@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-import trimesh
 from pathlib import Path
 
 class GraspDataset(Dataset):
@@ -22,6 +21,15 @@ class GraspDataset(Dataset):
         scene_file = self.data_files[idx]
         
         scene_data = np.load(scene_file)
-        scene_tensors = {k: torch.from_numpy(v) for k, v in scene_data.items()}
+
+        # Only use the last 7 entries in each grasp, as they are the values of the hand pose
+        grasps = scene_data["grasps"][:, -7:]
+
+        # Convert to tensors
+        scene_tensors = {
+            "sdf": torch.from_numpy(scene_data["sdf"]),
+            "grasps": torch.from_numpy(grasps),
+            "scores": torch.from_numpy(scene_data["scores"])
+        }
         
         return scene_tensors
