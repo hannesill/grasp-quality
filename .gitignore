@@ -6,3 +6,15 @@
 
 # Python
 __pycache__
+
+# VS Code
+.vscode
+
+# Conda
+.conda
+.conda-meta
+.conda-env
+.conda-env-meta
+
+# Jupyter
+.ipynb_checkpoints
