@@ -9,41 +9,27 @@ import functools, multiprocessing as mp, time, argparse
 import numpy as np
 import trimesh
 from mesh_to_sdf import mesh_to_voxels
+from mesh2sdf import compute
 from tqdm import tqdm
 from pathlib import Path
 
-try:
-    import torch
-    import torchcumesh2sdf
-    TORCHCUMESH2SDF_AVAILABLE = True
-except ImportError:
-    TORCHCUMESH2SDF_AVAILABLE = False
-
 # ───────────────────────────────── SDF ────────────────────────────────────
-def mesh_to_sdf(mesh:trimesh.Trimesh, n:int, use_gpu:bool, gpu_sdf_band_factor:float, sign_method:str='normal', scan_count:int=100, scan_resolution:int=400) -> np.ndarray:
-    """Return (n,n,n) float32 SDF in canonical cube [-1,1]^3."""
-    mesh = mesh.copy()
-    mesh.apply_translation(-mesh.centroid)
-    mesh.apply_scale(1.0 / mesh.extents.max())     # largest dimension == 1
+def mesh_to_sdf(mesh:trimesh.Trimesh, n:int, fix_mesh:bool = True) -> np.ndarray:
+    """Return (n,n,n) float32 SDF in canonical cube [-1,1]^3 using mesh2sdf."""
+    mesh_copy = mesh.copy()
+    mesh_copy.apply_translation(-mesh_copy.centroid)
+    mesh_copy.apply_scale(1.0 / mesh_copy.extents.max())     # largest dimension == 1, vertices in [-1,1]
 
-    if use_gpu and TORCHCUMESH2SDF_AVAILABLE:
-        if not (n > 0 and (n & (n - 1) == 0)): # Check if n is power of 2
-            print(f"Warning: Grid resolution {n} is not a power of 2. GPU SDF computation via cumesh2sdf requires power-of-2 resolution. Falling back to CPU for this item.")
-        else:
-            try:
-                if not torch.cuda.is_available():
-                    print("Warning: CUDA not available for PyTorch. Falling back to CPU for SDF computation.")
-                else:
-                    tris_tensor = torch.tensor(mesh.triangles, dtype=torch.float32, device='cuda')
-                    band = float(gpu_sdf_band_factor) / n
-                    # Assuming mesh.triangles are already in the normalized space due to pre-processing
-                    sdf_tensor = torchcumesh2sdf.get_sdf(tris_tensor, R=n, band=band)
-                    return sdf_tensor.cpu().numpy()
-            except Exception as e:
-                print(f"Error during GPU SDF computation: {e}. Falling back to CPU.")
-    
-    # Fallback to CPU method (original mesh_to_voxels)
-    return mesh_to_voxels(mesh, voxel_resolution=n, sign_method=sign_method, scan_count=scan_count, scan_resolution=scan_resolution).astype(np.float32)
+    # Call mesh2sdf.compute
+    sdf_data = compute(
+        vertices=mesh_copy.vertices,
+        faces=mesh_copy.faces,
+        size=n,
+        fix=fix_mesh,
+        level=2.0 / n,  # Recommended default: 2/size
+        return_mesh=False
+    )
+    return sdf_data.astype(np.float32)
 
 # ────────────────────────────── Grasps → volume ──────────────────────────
 def grasps_to_volume(g:np.ndarray, n:int, sigma:float=1.5) -> np.ndarray:
@@ -69,9 +55,8 @@ def grasps_to_volume(g:np.ndarray, n:int, sigma:float=1.5) -> np.ndarray:
     return vol.astype(np.float32)
 
 # ─────────────────────────────── Per-file job ────────────────────────────
-def process(item_dir: Path, grid_res: int, raw_dir: Path, output_dir: Path, 
-            sign_method:str, scan_count:int, scan_resolution:int,
-            use_gpu:bool, gpu_sdf_band_factor:float):
+def process(item_dir: Path, grid_res: int, raw_dir: Path, output_dir: Path,
+            fix_mesh: bool):
     obj_path = item_dir / 'mesh.obj'
     npz_path = item_dir / 'recording.npz'
 
@@ -98,8 +83,7 @@ def process(item_dir: Path, grid_res: int, raw_dir: Path, output_dir: Path,
             print(f"Warning: Mesh loaded from {obj_path} is empty or invalid. Skipping {item_dir}.")
             return
 
-        sdf  = mesh_to_sdf(mesh, grid_res, use_gpu=use_gpu, gpu_sdf_band_factor=gpu_sdf_band_factor, 
-                           sign_method=sign_method, scan_count=scan_count, scan_resolution=scan_resolution)
+        sdf  = mesh_to_sdf(mesh, grid_res, fix_mesh=fix_mesh)
 
         recording = np.load(str(npz_path))
         
@@ -123,14 +107,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pre-compute SDFs and grasp volumes for a dataset.")
     parser.add_argument('-r', '--raw_dir', type=str, default='data/raw', help="Input directory containing raw mesh files (e.g., /data/raw_meshes).")
     parser.add_argument('-o', '--output_dir', type=str, default='data/processed', help="Output directory to save precomputed SDFs and grasp volumes (e.g., /data/processed_data).")
-    parser.add_argument('-g', '--grid_res', type=int, default=48, help="Grid resolution for voxelization (default: 48). For GPU mode, this must be a power of 2 (e.g., 32, 64).")
+    parser.add_argument('-g', '--grid_res', type=int, default=48, help="Grid resolution for voxelization (default: 48).")
     parser.add_argument('-c', '--cores', type=int, default=24, help="Number of CPU cores for parallel processing (default: 24).")
     parser.add_argument('-l', '--limit', type=int, default=None, help="Maximum number of items to process (default: process all).")
-    parser.add_argument('--sign_method', type=str, default='normal', choices=['normal', 'depth'], help="CPU SDF: Method for determining SDF sign (default: normal). 'depth' is faster but requires watertight meshes.")
-    parser.add_argument('--scan_count', type=int, default=100, help="CPU SDF: Number of scans for SDF generation (default: 100).")
-    parser.add_argument('--scan_resolution', type=int, default=400, help="CPU SDF: Resolution of scans for SDF generation (default: 400).")
-    parser.add_argument('--use_gpu', action='store_true', help="Use GPU for SDF computation via cumesh2sdf (if available). Requires --grid_res to be a power of 2.")
-    parser.add_argument('--gpu_sdf_band_factor', type=float, default=3.0, help="GPU SDF: Factor to determine band size (band = factor / grid_res). Default: 3.0.")
+    parser.add_argument('--fix_mesh', action='store_true', default=True, help="Attempt to fix non-watertight meshes when computing SDF with mesh2sdf (default: True).")
+    parser.add_argument('--no-fix_mesh', dest='fix_mesh', action='store_false', help="Disable fixing meshes for mesh2sdf.")
     args = parser.parse_args()
 
     GRID_RES = args.grid_res
@@ -138,15 +119,8 @@ if __name__ == "__main__":
     RAW_DIR = Path(args.raw_dir)
     OUT_DIR = Path(args.output_dir)
 
-    if args.use_gpu and not TORCHCUMESH2SDF_AVAILABLE:
-        print("Warning: --use_gpu was specified, but torchcumesh2sdf library is not available. Falling back to CPU.")
-    elif args.use_gpu and TORCHCUMESH2SDF_AVAILABLE and not torch.cuda.is_available():
-        print("Warning: --use_gpu was specified, but PyTorch CUDA is not available. Falling back to CPU.")
-    elif args.use_gpu and TORCHCUMESH2SDF_AVAILABLE and not (args.grid_res > 0 and (args.grid_res & (args.grid_res - 1) == 0)):
-        print(f"Warning: --use_gpu was specified, but grid_res ({args.grid_res}) is not a power of 2. GPU SDF computation will fallback to CPU if this is not corrected for each item, or you might encounter errors.")
-
     t0 = time.time()
-    item_dirs = [p for p in RAW_DIR.iterdir() if p.is_dir()]
+    item_dirs = sorted([p for p in RAW_DIR.iterdir() if p.is_dir()])
     if args.limit is not None and args.limit > 0:
         item_dirs = item_dirs[:args.limit]
         print(f"Found {len(item_dirs):,} items (subdirectories) to process in {RAW_DIR} (limited to first {args.limit})")
@@ -157,14 +131,10 @@ if __name__ == "__main__":
                                   grid_res=GRID_RES,
                                   raw_dir=RAW_DIR,
                                   output_dir=OUT_DIR,
-                                  sign_method=args.sign_method,
-                                  scan_count=args.scan_count,
-                                  scan_resolution=args.scan_resolution,
-                                  use_gpu=args.use_gpu,
-                                  gpu_sdf_band_factor=args.gpu_sdf_band_factor)
+                                  fix_mesh=args.fix_mesh)
 
     print(f"Running in multi-core mode with {CORES} cores.")
-    with mp.Pool(CORES, maxtasksperchild=1) as pool:
-        list(tqdm(pool.imap_unordered(worker_fn, item_dirs, chunksize=1), total=len(item_dirs)))
+    with mp.Pool(CORES, maxtasksperchild=1000) as pool: # prevent resource accumulation by restarting workers after 1000 tasks
+        list(tqdm(pool.imap_unordered(worker_fn, item_dirs, chunksize=8), total=len(item_dirs))) # process in chunks of 8
 
     print(f"All done in {(time.time()-t0)/60:.1f} min → {OUT_DIR}")
