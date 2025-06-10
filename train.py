@@ -6,34 +6,50 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import math
 import torch
+import wandb
+
+# --- Configuration ---
+LEARNING_RATE = 1e-4
+EPOCHS = 100
+VAL_SPLIT = 0.2
+BASE_CHANNELS = 16
+FC_DIMS = [256, 128, 64]
+
+# Initialize wandb
+wandb.init(
+    project="grasp-quality-estimator",
+    config={
+        "learning_rate": LEARNING_RATE,
+        "epochs": EPOCHS,
+        "val_split": VAL_SPLIT,
+        "architecture": "GQEstimator",
+        "dataset": "GraspNet-1Billion-Subset",
+        "base_channels": BASE_CHANNELS,
+        "fc_dims": FC_DIMS
+    }
+)
 
 # Load the dataset
 data_path = Path('data/processed')
 dataset = GraspDataset(data_path)
 
 # Split dataset into training and validation
-val_split = 0.2
 num_samples = len(dataset)
-train_size = int(num_samples * (1 - val_split))
+train_size = int(num_samples * (1 - VAL_SPLIT))
 val_size = num_samples - train_size
 
-print(f"Subset samples: {num_samples}, Calculated train size: {train_size}, Calculated val size: {val_size}")
+print(f"Total scenes: {num_samples}, Train scenes: {train_size}, Val scenes: {val_size}")
 
 # Shuffle indices
 random.seed(42)
 indices = list(range(num_samples))
 random.shuffle(indices)
 
-# Split indices
-train_indices = indices[:100]
-val_indices = indices[-10:]
-
-# Create Subsets
-train_dataset = torch.utils.data.Subset(dataset, train_indices)
-val_dataset = torch.utils.data.Subset(dataset, val_indices)
+# Create Subsets using the full dataset indices
+train_dataset = torch.utils.data.Subset(dataset, indices[:100])
+val_dataset = torch.utils.data.Subset(dataset, indices[-10:])
 
 print(f"Train dataset size: {len(train_dataset)}, Validation dataset size: {len(val_dataset)}")
-
 
 # Initialize model and move to device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -41,28 +57,33 @@ print(f"Using device: {device}")
 
 model = GQEstimator(
     input_size=48,
-    base_channels=16,
-    fc_dims=[256, 128, 64]
+    base_channels=BASE_CHANNELS,
+    fc_dims=FC_DIMS
 ).to(device)
 
-# Training parameters
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-criterion = torch.nn.MSELoss()
-num_epochs = 100
-train_losses = []
-val_losses = []
+# Log model architecture and gradients to wandb
+wandb.watch(model, log="all", log_freq=100)
 
-print(f"\nStarting quick training for {num_epochs} epochs...")
-for epoch in range(num_epochs):
+# Training parameters
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+criterion = torch.nn.MSELoss()
+
+print(f"\nStarting training for {EPOCHS} epochs...")
+for epoch in range(EPOCHS):
     model.train()
     epoch_train_loss = 0.0
+    total_train_grasps = 0
 
-    # Iterate over scenes
-    for scene in tqdm(train_dataset, desc=f"Epoch {epoch+1}/{num_epochs} Training", leave=False):
-        num_samples = len(scene['grasps'])
+    # Iterate over scenes for training
+    for scene in tqdm(train_dataset, desc=f"Epoch {epoch+1}/{EPOCHS} Training", leave=False):
+        num_grasps_in_scene = len(scene['grasps'])
+        if num_grasps_in_scene == 0:
+            continue
+        
+        total_train_grasps += num_grasps_in_scene
+        sdf = scene['sdf'].float().to(device)
 
-        for i in range(num_samples):
-            sdf = scene['sdf'].float().to(device)
+        for i in range(num_grasps_in_scene):
             hand_pose = scene['grasps'][i].float().to(device)
             scores = scene['scores'][i].float().to(device).unsqueeze(0)
 
@@ -74,36 +95,48 @@ for epoch in range(num_epochs):
 
             epoch_train_loss += loss.item()
 
-    avg_epoch_train_loss = epoch_train_loss / train_size
-    train_losses.append(avg_epoch_train_loss)
+    avg_epoch_train_loss = epoch_train_loss / total_train_grasps if total_train_grasps > 0 else 0
 
     # Validation loop
     model.eval()
     epoch_val_loss = 0.0
+    total_val_grasps = 0
     with torch.no_grad():
-        for scene in tqdm(val_dataset, desc=f"Epoch {epoch+1}/{num_epochs} Validation", leave=False):
-            num_samples = len(scene['grasps'])
+        for scene in tqdm(val_dataset, desc=f"Epoch {epoch+1}/{EPOCHS} Validation", leave=False):
+            num_grasps_in_scene = len(scene['grasps'])
+            if num_grasps_in_scene == 0:
+                continue
 
-            for i in range(num_samples):
-                sdf = scene['sdf'].float().to(device)
+            total_val_grasps += num_grasps_in_scene
+            sdf = scene['sdf'].float().to(device)
+
+            for i in range(num_grasps_in_scene):
                 hand_pose = scene['grasps'][i].float().to(device)
                 scores = scene['scores'][i].float().to(device).unsqueeze(0)
+                
+                pred_quality = model(sdf, hand_pose)
+                loss = criterion(pred_quality, scores)
+                epoch_val_loss += loss.item()
 
-            pred_quality = model(sdf, hand_pose)
-            loss = criterion(pred_quality, scores)
-            epoch_val_loss += loss.item()
+    avg_epoch_val_loss = epoch_val_loss / total_val_grasps if total_val_grasps > 0 else 0
 
-    avg_epoch_val_loss = epoch_val_loss / val_size
-    val_losses.append(avg_epoch_val_loss)
+    print(f'Epoch [{epoch+1}/{EPOCHS}], Train Loss: {avg_epoch_train_loss:.4f}, Val Loss: {avg_epoch_val_loss:.4f}')
 
-    print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_epoch_train_loss:.4f}, Val Loss: {avg_epoch_val_loss:.4f}')
+    # Log metrics to wandb
+    wandb.log({
+        "epoch": epoch + 1,
+        "train_loss": avg_epoch_train_loss,
+        "val_loss": avg_epoch_val_loss
+    })
 
-# Plot loss curve
-plt.figure(figsize=(10, 5))
-plt.plot(train_losses, label='Training Loss')
-plt.plot(val_losses, label='Validation Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid(True)
-plt.show()
+# Save model
+model_path = "model.pth"
+torch.save(model.state_dict(), model_path)
+print(f"Model saved successfully to {model_path}")
+
+# Log model artifact to wandb
+artifact = wandb.Artifact('gq-estimator', type='model')
+artifact.add_file(model_path)
+wandb.log_artifact(artifact)
+
+wandb.finish()
