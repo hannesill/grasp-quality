@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--train_size', type=int, default=10000, help='Number of training samples')
     parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
-    # parser.add_argument('--val_split', type=float, default=0.2, help='Validation split ratio')
+    parser.add_argument('--val_split', type=float, default=0.2, help='Validation split ratio')
     parser.add_argument('--base_channels', type=int, default=16, help='Base channels for the CNN')
     parser.add_argument('--fc_dims', nargs='+', type=int, default=[256, 128, 64], help='Dimensions of FC layers in the head')
     parser.add_argument('--grasp_batch_size', type=int, default=32, help='Batch size for grasps within a scene')
