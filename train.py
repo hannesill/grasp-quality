@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--val_split', type=float, default=0.2, help='Validation split ratio')
-    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
+    parser.add_argument('--base_channels', type=int, default=16, help='Base channels for the CNN')
     parser.add_argument('--fc_dims', nargs='+', type=int, default=[128, 64, 16], help='Dimensions of FC layers in the head')
     parser.add_argument('--grasp_batch_size', type=int, default=32, help='Batch size for grasps within a scene')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers')
@@ -81,12 +81,14 @@ def main(args):
             optimizer.zero_grad()
             
             sdf, grasp_batch, score_batch = sdf.to(device), grasp_batch.to(device), score_batch.to(device)
+
+            num_grasps_in_batch = grasp_batch.shape[0]
             
             # 1. Encode SDF
             sdf_features = model.encode_sdf(sdf)
 
             # 2. Expand features for the grasp batch
-            expanded_sdf_features = sdf_features.expand(args.grasp_batch_size, -1)
+            expanded_sdf_features = sdf_features.expand(num_grasps_in_batch, -1)
 
             # 3. Concatenate features
             flattened_features = torch.cat([expanded_sdf_features, grasp_batch], dim=1)
@@ -114,12 +116,14 @@ def main(args):
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for sdf, grasp_batch, score_batch in pbar_val:
                 sdf, grasp_batch, score_batch = sdf.to(device), grasp_batch.to(device), score_batch.to(device)
+
+                num_grasps_in_batch = grasp_batch.shape[0]
                 
                 # 1. Encode SDF
                 sdf_features = model.encode_sdf(sdf)
 
                 # 2. Expand features for the grasp batch
-                expanded_sdf_features = sdf_features.expand(args.grasp_batch_size, -1)
+                expanded_sdf_features = sdf_features.expand(num_grasps_in_batch, -1)
 
                 # 3. Concatenate features
                 flattened_features = torch.cat([expanded_sdf_features, grasp_batch], dim=1)
