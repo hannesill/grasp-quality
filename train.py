@@ -12,8 +12,8 @@ import wandb
 LEARNING_RATE = 1e-4
 EPOCHS = 100
 VAL_SPLIT = 0.2
-BASE_CHANNELS = 16
-FC_DIMS = [256, 128, 64]
+BASE_CHANNELS = 4
+FC_DIMS = [64, 32, 16]
 
 # Initialize wandb
 wandb.init(
@@ -46,8 +46,8 @@ indices = list(range(num_samples))
 random.shuffle(indices)
 
 # Create Subsets using the full dataset indices
-train_dataset = torch.utils.data.Subset(dataset, indices[:100])
-val_dataset = torch.utils.data.Subset(dataset, indices[-10:])
+train_dataset = torch.utils.data.Subset(dataset, indices[:1000])
+val_dataset = torch.utils.data.Subset(dataset, indices[-100:])
 
 print(f"Train dataset size: {len(train_dataset)}, Validation dataset size: {len(val_dataset)}")
 
