@@ -50,8 +50,8 @@ def main(args):
     random.seed(42)
     random.shuffle(indices)
 
-    train_indices = indices[:1000]
-    val_indices = indices[-100:]
+    train_indices = indices[:args.train_size]
+    val_indices = indices[-args.val_size:]
 
     train_set = Subset(dataset, train_indices)
     val_set = Subset(dataset, val_indices)
