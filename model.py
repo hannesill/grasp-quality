@@ -48,23 +48,37 @@ class GQEstimator(nn.Module):
         layers.append(nn.Linear(prev_dim, 1))
         self.gq_head = nn.Sequential(*layers)
 
-        # Store for forward pass
-        self.flattened_size = flattened_size
-
         print(f"Number of parameters: {sum(p.numel() for p in self.parameters())}")
 
-    def forward(self, sdf, hand_pose):
-        # Add a channel dimension to the SDF
-        sdf = sdf.unsqueeze(0) # 1x48x48x48
-        
-        x = self.conv_block(sdf) # 128x3x3x3
+    def encode_sdf(self, sdf):
+        """
+        Encodes the SDF into a flat feature vector.
+        args:
+            sdf: (48, 48, 48)
+        returns: (flattened_size)
+        """
+        # Add channel dimension
+        sdf = sdf.unsqueeze(0)
 
-        # Flatten the 4d tensor to 1d
-        x = x.view(self.flattened_size) # 128x3x3x3 -> 128*3*3*3 = 3456
+        # Get features (channel_dim, D, D, D)
+        features = self.conv_block(sdf)
 
-        # Concatenate hand pose with flattened SDF
-        x = torch.cat([x, hand_pose])
+        # Flatten (channel_dim, D, D, D) -> (flattened_size,)
+        return features.view(-1)
+
+    def forward(self, x):
+        """
+        Processes a batch of SDFs and hand poses to predict grasp quality.
+        This is not the most efficient way for this specific training problem
+        but it's a standard batch-aware forward pass.
+        args:
+            flattened_features: (B, flattened_size)
+        returns: grasp_quality (B,)
+        """
 
         grasp_quality = self.gq_head(x)
+
+        # Reshape: (B, 1) -> (B,)
+        grasp_quality = grasp_quality.view(-1)
 
         return grasp_quality
