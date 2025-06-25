@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('--grasp_batch_size', type=int, default=32, help='Batch size for grasps within a scene')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
-    parser.add_argument('--project_name', type=str, default='grasp-quality', help='WandB project name')
+    parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     return parser.parse_args()
 
