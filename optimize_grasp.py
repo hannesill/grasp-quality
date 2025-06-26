@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import time
+import shutil
 
 from model import GQEstimator
 from dataset import GraspDataset
@@ -303,6 +304,7 @@ def parse_args():
     parser.add_argument('--tolerance', type=float, default=1e-6, help='Convergence tolerance')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on (cuda/cpu)')
     parser.add_argument('--save_plot', type=str, default=None, help='Path to save visualization plot')
+    parser.add_argument('--save_path', type=str, default='data/output', help='Path to save optimized grasps')
     return parser.parse_args()
 
 
@@ -349,6 +351,37 @@ def main():
     print(f"\nOptimized grasp configuration:")
     print(f"Hand pose (pos + quat): {result['optimized_grasp'][:7].tolist()}")
     print(f"Finger joints: {result['optimized_grasp'][7:].tolist()}")
+
+    # Save the optimized grasp configuration
+    scene_name = Path(dataset.data_files[args.scene_idx]).parent.name
+    raw_dir = Path('data/raw')
+    raw_path = raw_dir / scene_name
+    output_dir = Path(args.save_path)
+    output_path = output_dir / scene_name
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nSaving optimized grasp to {output_path}")
+
+    # Copy mesh.obj
+    source_mesh_path = raw_path / 'mesh.obj'
+    if source_mesh_path.exists():
+        shutil.copy(source_mesh_path, output_path)
+    else:
+        print(f"Warning: mesh.obj not found at {source_mesh_path}")
+
+    # Save grasp and score
+    optimized_grasp = result['optimized_grasp'].numpy()
+    final_quality = result['final_quality']
+    
+    # Save in the format expected by vis_grasp.py (as arrays)
+    grasps_to_save = np.array([optimized_grasp])
+    scores_to_save = np.array([final_quality])
+    
+    npz_path = output_path / 'recording.npz'
+    np.savez(npz_path, grasps=grasps_to_save, scores=scores_to_save)
+    
+    print(f"Saved recording.npz with 1 grasp.")
+    print(f"To visualize, run: python3 vis_grasp.py {output_path}")
 
 
 if __name__ == "__main__":
