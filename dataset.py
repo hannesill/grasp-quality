@@ -2,10 +2,9 @@ import torch
 from torch.utils.data import Dataset, IterableDataset
 import numpy as np
 from pathlib import Path
-import random
-import math
+from tqdm import tqdm
 
-class GraspDataset(Dataset):
+class SceneDataset(Dataset):
     def __init__(self, data_path):
         self.data_path = data_path
         self.data_files = [dir / 'scene.npz' for dir in data_path.iterdir() if dir.is_dir() and (dir / 'scene.npz').exists()]
@@ -17,7 +16,7 @@ class GraspDataset(Dataset):
         scene_file = self.data_files[idx]
         with np.load(scene_file) as scene_data:
             # Only use the last 7 entries in each grasp, as they are the values of the hand pose
-            grasps = scene_data["grasps"][:, -7:]    # shape: (N=480, G_dim=7)
+            grasps = scene_data["grasps"][:, :]    # shape: (N=480, G_dim=19)
             sdf = scene_data["sdf"]
             scores = scene_data["scores"]    # shape: (N=480,)
 
@@ -45,53 +44,51 @@ class GraspDataset(Dataset):
         }
         
         return scene_tensors
+    
 
-
-class GraspBatchIterableDataset(IterableDataset):
-    def __init__(self, scene_dataset, grasp_batch_size=32, shuffle_scenes=True):
+class GraspDataset(Dataset):
+    def __init__(self, data_path, shuffle_grasps=True):
         super().__init__()
-        self.scene_dataset = scene_dataset
-        self.grasp_batch_size = grasp_batch_size
-        self.shuffle_scenes = shuffle_scenes
+        self.data_path = data_path
+        self.data_files = [dir / 'scene.npz' for dir in data_path.iterdir() if dir.is_dir() and (dir / 'scene.npz').exists()]
 
-    def _iter_scenes(self):
-        worker_info = torch.utils.data.get_worker_info()
-        
-        scene_indices = list(range(len(self.scene_dataset)))
-        if self.shuffle_scenes:
-            random.shuffle(scene_indices)
+        self.shuffle_grasps = shuffle_grasps
 
-        if worker_info is None:
-            # single-process data loading, iterate over all scenes
-            indices_to_process = scene_indices
+        # Assume each scene has 480 grasps & create list of (scene_idx, grasp_idx) tuples
+        self.grasp_locations = [(scene_idx, grasp_idx) for scene_idx in range(len(self.data_files)) for grasp_idx in range(480)]
+
+        if self.shuffle_grasps:
+            self.grasp_indices = torch.randperm(len(self.grasp_locations))
         else:
-            # multi-process data loading, split the work
-            num_workers = worker_info.num_workers
-            worker_id = worker_info.id
-            per_worker = int(math.ceil(len(scene_indices) / float(num_workers)))
-            start = worker_id * per_worker
-            end = min(start + per_worker, len(scene_indices))
-            indices_to_process = scene_indices[start:end]
+            self.grasp_indices = list(range(len(self.grasp_locations)))
 
-        for scene_idx in indices_to_process:
-             yield self.scene_dataset[scene_idx]
+    def __len__(self):
+        return len(self.grasp_locations)
 
+    def __getitem__(self, idx):
+        scene_idx, grasp_idx = self.grasp_locations[idx]
+        with np.load(self.data_files[scene_idx]) as scene_data:
+            sdf = scene_data["sdf"]
+            grasps = scene_data["grasps"][:, :]    # shape: (N=480, G_dim=19)
+            scores = scene_data["scores"]    # shape: (N=480,)
+
+        # Handle IndexError by selecting a random valid grasp
+        num_grasps = grasps.shape[0]
+        if grasp_idx >= num_grasps:
+            grasp_idx = np.random.randint(num_grasps)
+
+        grasp = grasps[grasp_idx]
+        score = scores[grasp_idx]
+
+        return {
+            "sdf": torch.from_numpy(sdf).float(),
+            "grasp": torch.from_numpy(grasp).float(),
+            "score": torch.tensor(score, dtype=torch.float32),
+            "scene_idx": scene_idx,
+            "grasp_idx": grasp_idx
+        }
+    
     def __iter__(self):
-        for scene in self._iter_scenes():
-            sdf = scene['sdf']
-            grasps = scene['grasps']
-            scores = scene['scores']
-            
-            num_grasps = grasps.shape[0]
-            if num_grasps == 0:
-                continue
-
-            perm = torch.randperm(num_grasps)
-            shuffled_grasps = grasps[perm]
-            shuffled_scores = scores[perm]
-
-            for i in range(0, num_grasps, self.grasp_batch_size):
-                grasp_batch = shuffled_grasps[i : i + self.grasp_batch_size]
-                score_batch = shuffled_scores[i : i + self.grasp_batch_size]
+        for idx in range(len(self)):
+            yield self[idx]
                 
-                yield sdf, grasp_batch, score_batch
