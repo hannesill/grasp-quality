@@ -15,8 +15,7 @@ class SceneDataset(Dataset):
     def __getitem__(self, idx):
         scene_file = self.data_files[idx]
         with np.load(scene_file) as scene_data:
-            # Only use the last 7 entries in each grasp, as they are the values of the hand pose
-            grasps = scene_data["grasps"][:, :]    # shape: (N=480, G_dim=19)
+            grasps = scene_data["grasps"]    # shape: (N=480, G_dim=19)
             sdf = scene_data["sdf"]
             scores = scene_data["scores"]    # shape: (N=480,)
 

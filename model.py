@@ -36,7 +36,7 @@ class GQEstimator(nn.Module):
 
         # Grasp quality head
         layers = []
-        prev_dim = flattened_size + 19  # Add 19 for hand pose
+        prev_dim = flattened_size + 19  # Add 7 (hand pose) + 12 (fingers)
         
         for dim in fc_dims:
             layers.extend([
