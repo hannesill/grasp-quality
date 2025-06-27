@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
+    parser.add_argument('--check_data_distribution', action='store_true', default=False, help='Check data distribution')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -76,24 +77,25 @@ def main(args):
     val_set = Subset(dataset, val_indices)
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
 
-    # Data distribution analysis
-    print("\n=== Data Distribution Analysis ===")
-    train_scores = []
-    val_scores = []
+    if args.check_data_distribution:
+        # Data distribution analysis
+        print("\n=== Data Distribution Analysis ===")
+        train_scores = []
+        val_scores = []
 
-    for i in range(len(train_set)):
-        train_scores.append(train_set[i]['score'].item())
-        
-    for i in range(len(val_set)):
-        val_scores.append(val_set[i]['score'].item())
+        for i in range(len(train_set)):
+            train_scores.append(train_set[i]['score'].item())
+            
+        for i in range(len(val_set)):
+            val_scores.append(val_set[i]['score'].item())
 
-    train_scores = np.array(train_scores)
-    val_scores = np.array(val_scores)
+        train_scores = np.array(train_scores)
+        val_scores = np.array(val_scores)
 
-    print(f"Train scores - Mean: {train_scores.mean():.3f}, Std: {train_scores.std():.3f}")
-    print(f"Val scores   - Mean: {val_scores.mean():.3f}, Std: {val_scores.std():.3f}")
-    print(f"Distribution difference: {abs(train_scores.mean() - val_scores.mean()):.3f}")
-    print("===================\n")
+        print(f"Train scores - Mean: {train_scores.mean():.3f}, Std: {train_scores.std():.3f}")
+        print(f"Val scores   - Mean: {val_scores.mean():.3f}, Std: {val_scores.std():.3f}")
+        print(f"Distribution difference: {abs(train_scores.mean() - val_scores.mean()):.3f}")
+        print("===================\n")
 
     # Create DataLoaders
     pin_memory = torch.cuda.is_available()
