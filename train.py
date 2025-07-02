@@ -1,5 +1,6 @@
 import argparse
 import random
+import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -7,7 +8,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import GraspDataset
+from dataset import GraspDataset, OptimizedGraspDataset
 from model import GQEstimator
 
 def parse_args():
@@ -44,6 +45,72 @@ class EarlyStopping:
             self.counter += 1
         return self.counter >= self.patience
 
+def collect_unique_scene_indices(dataloader):
+    """
+    Collect all unique scene indices that will be used in this epoch.
+    
+    Args:
+        dataloader: DataLoader that yields batches with scene_idx
+    
+    Returns:
+        set: Set of unique scene indices
+    """
+    unique_scenes = set()
+    for batch in dataloader:
+        scene_indices = batch['scene_idx']
+        unique_scenes.update(scene_indices.tolist())
+    return unique_scenes
+
+def preprocess_epoch_sdfs(unique_scene_indices, dataset, model, device):
+    """
+    Pre-encode all unique SDFs for the epoch.
+    
+    Args:
+        unique_scene_indices: Set of unique scene indices
+        dataset: Dataset to get SDFs from
+        model: Model with encode_sdf method
+        device: Device to move tensors to
+    
+    Returns:
+        dict: Mapping from scene_idx to encoded SDF features
+    """
+    sdf_features_cache = {}
+    
+    print(f"Pre-encoding {len(unique_scene_indices)} unique SDFs for this epoch...")
+    with torch.no_grad():  # No gradients needed for SDF encoding
+        for scene_idx in tqdm(unique_scene_indices, desc="Encoding SDFs"):
+            sdf = dataset.get_sdf(scene_idx).to(device)
+            sdf_features = model.encode_sdf(sdf)
+            sdf_features_cache[scene_idx] = sdf_features.detach()  # Store on GPU
+    
+    return sdf_features_cache
+
+def process_batch_with_cached_features(batch, sdf_features_cache, device):
+    """
+    Process batch using pre-computed SDF features.
+    
+    Args:
+        batch: Batch from dataloader
+        sdf_features_cache: Pre-computed SDF features
+        device: Device
+    
+    Returns:
+        tuple: (sdf_features_batch, grasp_batch, score_batch)
+    """
+    scene_indices = batch['scene_idx']
+    grasp_batch = batch['grasp'].to(device)
+    score_batch = batch['score'].to(device)
+    
+    # Build batch of SDF features by lookup
+    batch_size = len(scene_indices)
+    feature_dim = next(iter(sdf_features_cache.values())).shape[0]
+    sdf_features_batch = torch.zeros(batch_size, feature_dim, device=device)
+    
+    for i, scene_idx in enumerate(scene_indices):
+        sdf_features_batch[i] = sdf_features_cache[scene_idx.item()]
+    
+    return sdf_features_batch, grasp_batch, score_batch
+
 def main(args):
     # --- WandB Initialization ---
     wandb.init(
@@ -59,7 +126,7 @@ def main(args):
 
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
-    dataset = GraspDataset(data_path)
+    dataset = OptimizedGraspDataset(data_path)
 
     num_samples = len(dataset)
     print(f"Total samples: {num_samples}")
@@ -104,14 +171,16 @@ def main(args):
         batch_size=args.batch_size, 
         num_workers=args.num_workers, 
         pin_memory=pin_memory, 
-        persistent_workers=True if args.num_workers > 0 else False
+        persistent_workers=True if args.num_workers > 0 else False,
+        shuffle=True  # Important: shuffle for training
     )
     val_loader = DataLoader(
         val_set, 
         batch_size=args.batch_size, 
         num_workers=args.num_workers, 
         pin_memory=pin_memory, 
-        persistent_workers=True if args.num_workers > 0 else False
+        persistent_workers=True if args.num_workers > 0 else False,
+        shuffle=False  # No shuffle for validation
     )
 
     # --- Model, Optimizer, Loss ---
@@ -134,6 +203,39 @@ def main(args):
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
+        # === EPOCH-LEVEL SDF PREPROCESSING ===
+        print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
+        
+        # Collect unique scene indices for this epoch
+        start_time = time.time()
+        train_unique_scenes = collect_unique_scene_indices(train_loader)
+        val_unique_scenes = collect_unique_scene_indices(val_loader)
+        collection_time = time.time() - start_time
+        
+        print(f"Train unique scenes: {len(train_unique_scenes)}")
+        print(f"Validation unique scenes: {len(val_unique_scenes)}")
+        print(f"Scene collection time: {collection_time:.2f}s")
+        
+        # Pre-encode all unique SDFs
+        start_time = time.time()
+        train_sdf_cache = preprocess_epoch_sdfs(train_unique_scenes, dataset, model, device)
+        val_sdf_cache = preprocess_epoch_sdfs(val_unique_scenes, dataset, model, device)
+        preprocessing_time = time.time() - start_time
+        
+        print(f"SDF preprocessing time: {preprocessing_time:.2f}s")
+        
+        # Calculate efficiency metrics
+        total_train_samples = len(train_set)
+        total_val_samples = len(val_set)
+        train_efficiency = len(train_unique_scenes) / total_train_samples
+        val_efficiency = len(val_unique_scenes) / total_val_samples
+        
+        print(f"Train efficiency: {train_efficiency:.3f} (lower is better)")
+        print(f"Val efficiency: {val_efficiency:.3f} (lower is better)")
+        print(f"Train SDF reuse factor: {total_train_samples / len(train_unique_scenes):.1f}x")
+        print(f"Val SDF reuse factor: {total_val_samples / len(val_unique_scenes):.1f}x")
+        
+        # === TRAINING ===
         model.train()
         total_train_loss = 0
         num_steps = 0
@@ -142,21 +244,15 @@ def main(args):
         for batch in pbar:
             optimizer.zero_grad()
 
-            # Move to device
-            sdf_batch = batch['sdf'].to(device)
-            grasp_batch = batch['grasp'].to(device)
-            score_batch = batch['score'].to(device)
+            # Fast batch processing with cached SDF features
+            sdf_features_batch, grasp_batch, score_batch = process_batch_with_cached_features(
+                batch, train_sdf_cache, device
+            )
 
-            # Get the actual batch size (handles variable batch sizes)
-            actual_batch_size = sdf_batch.size(0)
+            actual_batch_size = sdf_features_batch.size(0)
 
-            # 1. Encode SDF
-            sdf_features = model.encode_sdf(sdf_batch)
-
-            # 2. Concatenate features
-            flattened_features = torch.cat([sdf_features, grasp_batch], dim=1)
-
-            # 3. Predict grasp quality and compute loss
+            # Concatenate and predict
+            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
             pred_quality = model(flattened_features)
             loss = criterion(pred_quality, score_batch)
             loss.backward()
@@ -175,27 +271,22 @@ def main(args):
 
         avg_train_loss = total_train_loss / num_steps
 
-        # --- Validation Loop ---
+        # === VALIDATION ===
         model.eval()
         total_val_loss = 0
         num_steps = 0
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
-                sdf_batch = batch['sdf'].to(device)
-                grasp_batch = batch['grasp'].to(device)
-                score_batch = batch['score'].to(device)
+                # Fast batch processing with cached SDF features
+                sdf_features_batch, grasp_batch, score_batch = process_batch_with_cached_features(
+                    batch, val_sdf_cache, device
+                )
 
-                # Get the actual batch size (handles variable batch sizes)
-                actual_batch_size = sdf_batch.size(0)
+                actual_batch_size = sdf_features_batch.size(0)
 
-                # 1. Encode SDF
-                sdf_features = model.encode_sdf(sdf_batch)
-
-                # 2. Concatenate features
-                flattened_features = torch.cat([sdf_features, grasp_batch], dim=1)
-
-                # 3. Predict grasp quality and compute loss
+                # Concatenate and predict
+                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
                 pred_quality = model(flattened_features)
                 loss = criterion(pred_quality, score_batch)
 
@@ -207,6 +298,10 @@ def main(args):
                 pbar_val.set_postfix(val_loss=f'{running_val_loss:.4f}')
 
         avg_val_loss = total_val_loss / num_steps
+        
+        # Clear SDF caches to free GPU memory
+        del train_sdf_cache, val_sdf_cache
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         # Step the scheduler
         scheduler.step(avg_val_loss)
@@ -226,7 +321,12 @@ def main(args):
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
-            "learning_rate": current_lr
+            "learning_rate": current_lr,
+            "train_unique_scenes": len(train_unique_scenes),
+            "val_unique_scenes": len(val_unique_scenes),
+            "train_efficiency": train_efficiency,
+            "val_efficiency": val_efficiency,
+            "preprocessing_time": preprocessing_time
         })
         
         # Early stopping check
