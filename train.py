@@ -78,18 +78,35 @@ def compute_epoch_scene_mapping(train_set, val_set):
         'all_scenes': all_unique_scenes
     }
 
-def preprocess_epoch_sdfs(unique_scene_indices, dataset, model, device):
+def preprocess_all_unique_sdfs_parallel(unique_scenes, dataset, model, device, batch_size=64):
     """
-    Pre-encode all unique SDFs for the epoch.
-    """
-    sdf_features_cache = {}
+    Pre-encode unique SDFs in parallel batches.
     
-    print(f"Pre-encoding {len(unique_scene_indices)} unique SDFs for this epoch...")
-    with torch.no_grad():  # No gradients needed for SDF encoding
-        for scene_idx in tqdm(unique_scene_indices, desc="Encoding SDFs"):
-            sdf = dataset.get_sdf(scene_idx).to(device)
-            sdf_features = model.encode_sdf(sdf)
-            sdf_features_cache[scene_idx] = sdf_features.detach()  # Store on GPU
+    Args:
+        unique_scenes: Set of unique scene indices
+        dataset: Dataset to get SDFs from  
+        model: Model with encode_sdf method
+        device: Device to process on
+        batch_size: Number of SDFs to process in parallel
+    """
+    print(f"Pre-encoding {len(unique_scenes)} unique SDFs in batches of {batch_size}...")
+    sdf_features_cache = {}
+    unique_scenes_list = list(unique_scenes)
+    
+    with torch.no_grad():
+        for i in tqdm(range(0, len(unique_scenes_list), batch_size), desc="Parallel SDF encoding"):
+            batch_scene_indices = unique_scenes_list[i:i + batch_size]
+            
+            # Load batch of SDFs
+            sdf_batch = torch.stack([dataset.get_sdf(scene_idx) for scene_idx in batch_scene_indices])
+            sdf_batch = sdf_batch.to(device)
+            
+            # Encode batch in parallel
+            sdf_features_batch = model.encode_sdf(sdf_batch)
+            
+            # Store results
+            for j, scene_idx in enumerate(batch_scene_indices):
+                sdf_features_cache[scene_idx] = sdf_features_batch[j].detach()
     
     return sdf_features_cache
 
@@ -195,8 +212,8 @@ def main(args):
         
         # Pre-encode all unique SDFs
         start_time = time.time()
-        train_sdf_cache = preprocess_epoch_sdfs(scene_mappings['train_scenes'], dataset, model, device)
-        val_sdf_cache = preprocess_epoch_sdfs(scene_mappings['val_scenes'], dataset, model, device)
+        train_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['train_scenes'], dataset, model, device)
+        val_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['val_scenes'], dataset, model, device)
         preprocessing_time = time.time() - start_time
         
         print(f"SDF preprocessing time: {preprocessing_time:.2f}s")
