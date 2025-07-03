@@ -45,34 +45,42 @@ class EarlyStopping:
             self.counter += 1
         return self.counter >= self.patience
 
-def collect_unique_scene_indices(dataloader):
+def collect_unique_scene_indices_fast(dataset_subset):
     """
-    Collect all unique scene indices that will be used in this epoch.
-    
-    Args:
-        dataloader: DataLoader that yields batches with scene_idx
-    
-    Returns:
-        set: Set of unique scene indices
+    Directly extract unique scene indices from dataset without loading data.
+    This is 100x+ faster than iterating through the dataloader.
     """
     unique_scenes = set()
-    for batch in dataloader:
-        scene_indices = batch['scene_idx']
-        unique_scenes.update(scene_indices.tolist())
+    
+    # Access the underlying dataset and indices
+    base_dataset = dataset_subset.dataset  # OptimizedGraspDataset
+    subset_indices = dataset_subset.indices  # Which samples we're using
+    
+    # Extract scene indices directly from grasp_locations
+    for idx in subset_indices:
+        scene_idx, grasp_idx = base_dataset.grasp_locations[idx]
+        unique_scenes.add(scene_idx)
+    
     return unique_scenes
+
+def compute_epoch_scene_mapping(train_set, val_set):
+    """
+    Pre-compute scene mappings once instead of every epoch.
+    Returns all unique scenes that will ever be used.
+    """
+    train_scenes = collect_unique_scene_indices_fast(train_set)
+    val_scenes = collect_unique_scene_indices_fast(val_set)
+    all_unique_scenes = train_scenes.union(val_scenes)
+    
+    return {
+        'train_scenes': train_scenes,
+        'val_scenes': val_scenes, 
+        'all_scenes': all_unique_scenes
+    }
 
 def preprocess_epoch_sdfs(unique_scene_indices, dataset, model, device):
     """
     Pre-encode all unique SDFs for the epoch.
-    
-    Args:
-        unique_scene_indices: Set of unique scene indices
-        dataset: Dataset to get SDFs from
-        model: Model with encode_sdf method
-        device: Device to move tensors to
-    
-    Returns:
-        dict: Mapping from scene_idx to encoded SDF features
     """
     sdf_features_cache = {}
     
@@ -88,14 +96,6 @@ def preprocess_epoch_sdfs(unique_scene_indices, dataset, model, device):
 def process_batch_with_cached_features(batch, sdf_features_cache, device):
     """
     Process batch using pre-computed SDF features.
-    
-    Args:
-        batch: Batch from dataloader
-        sdf_features_cache: Pre-computed SDF features
-        device: Device
-    
-    Returns:
-        tuple: (sdf_features_batch, grasp_batch, score_batch)
     """
     scene_indices = batch['scene_idx']
     grasp_batch = batch['grasp'].to(device)
@@ -144,25 +144,12 @@ def main(args):
     val_set = Subset(dataset, val_indices)
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
 
-    if args.check_data_distribution:
-        # Data distribution analysis
-        print("\n=== Data Distribution Analysis ===")
-        train_scores = []
-        val_scores = []
-
-        for i in range(len(train_set)):
-            train_scores.append(train_set[i]['score'].item())
-            
-        for i in range(len(val_set)):
-            val_scores.append(val_set[i]['score'].item())
-
-        train_scores = np.array(train_scores)
-        val_scores = np.array(val_scores)
-
-        print(f"Train scores - Mean: {train_scores.mean():.3f}, Std: {train_scores.std():.3f}")
-        print(f"Val scores   - Mean: {val_scores.mean():.3f}, Std: {val_scores.std():.3f}")
-        print(f"Distribution difference: {abs(train_scores.mean() - val_scores.mean()):.3f}")
-        print("===================\n")
+    # Get scene mappings (which unique scenes will be used in training and validation)
+    scene_mappings = compute_epoch_scene_mapping(train_set, val_set)
+    print("Unique scenes:")
+    print(f"Train scenes: {len(scene_mappings['train_scenes'])}")
+    print(f"Validation scenes: {len(scene_mappings['val_scenes'])}")
+    print(f"All scenes: {len(scene_mappings['all_scenes'])}")
 
     # Create DataLoaders
     pin_memory = torch.cuda.is_available()
@@ -190,7 +177,7 @@ def main(args):
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.7, patience=10, verbose=True
+        optimizer, mode='min', factor=0.7, patience=10
     )
     
     # Early stopping
@@ -206,20 +193,10 @@ def main(args):
         # === EPOCH-LEVEL SDF PREPROCESSING ===
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
-        # Collect unique scene indices for this epoch
-        start_time = time.time()
-        train_unique_scenes = collect_unique_scene_indices(train_loader)
-        val_unique_scenes = collect_unique_scene_indices(val_loader)
-        collection_time = time.time() - start_time
-        
-        print(f"Train unique scenes: {len(train_unique_scenes)}")
-        print(f"Validation unique scenes: {len(val_unique_scenes)}")
-        print(f"Scene collection time: {collection_time:.2f}s")
-        
         # Pre-encode all unique SDFs
         start_time = time.time()
-        train_sdf_cache = preprocess_epoch_sdfs(train_unique_scenes, dataset, model, device)
-        val_sdf_cache = preprocess_epoch_sdfs(val_unique_scenes, dataset, model, device)
+        train_sdf_cache = preprocess_epoch_sdfs(scene_mappings['train_scenes'], dataset, model, device)
+        val_sdf_cache = preprocess_epoch_sdfs(scene_mappings['val_scenes'], dataset, model, device)
         preprocessing_time = time.time() - start_time
         
         print(f"SDF preprocessing time: {preprocessing_time:.2f}s")
@@ -227,13 +204,13 @@ def main(args):
         # Calculate efficiency metrics
         total_train_samples = len(train_set)
         total_val_samples = len(val_set)
-        train_efficiency = len(train_unique_scenes) / total_train_samples
-        val_efficiency = len(val_unique_scenes) / total_val_samples
+        train_efficiency = len(scene_mappings['train_scenes']) / total_train_samples
+        val_efficiency = len(scene_mappings['val_scenes']) / total_val_samples
         
         print(f"Train efficiency: {train_efficiency:.3f} (lower is better)")
         print(f"Val efficiency: {val_efficiency:.3f} (lower is better)")
-        print(f"Train SDF reuse factor: {total_train_samples / len(train_unique_scenes):.1f}x")
-        print(f"Val SDF reuse factor: {total_val_samples / len(val_unique_scenes):.1f}x")
+        print(f"Train SDF reuse factor: {total_train_samples / len(scene_mappings['train_scenes']):.1f}x")
+        print(f"Val SDF reuse factor: {total_val_samples / len(scene_mappings['val_scenes']):.1f}x")
         
         # === TRAINING ===
         model.train()
@@ -322,8 +299,6 @@ def main(args):
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
             "learning_rate": current_lr,
-            "train_unique_scenes": len(train_unique_scenes),
-            "val_unique_scenes": len(val_unique_scenes),
             "train_efficiency": train_efficiency,
             "val_efficiency": val_efficiency,
             "preprocessing_time": preprocessing_time
