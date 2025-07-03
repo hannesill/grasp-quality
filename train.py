@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     parser.add_argument('--check_data_distribution', action='store_true', default=False, help='Check data distribution')
+    parser.add_argument('--sdf_batch_size', type=int, default=128, help='Batch size for SDF encoding')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -78,7 +79,7 @@ def compute_epoch_scene_mapping(train_set, val_set):
         'all_scenes': all_unique_scenes
     }
 
-def preprocess_all_unique_sdfs_parallel(unique_scenes, dataset, model, device, batch_size=64):
+def preprocess_all_unique_sdfs_parallel(unique_scenes, dataset, model, device, batch_size):
     """
     Pre-encode unique SDFs in parallel batches.
     
@@ -212,8 +213,8 @@ def main(args):
         
         # Pre-encode all unique SDFs
         start_time = time.time()
-        train_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['train_scenes'], dataset, model, device)
-        val_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['val_scenes'], dataset, model, device)
+        train_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['train_scenes'], dataset, model, device, args.sdf_batch_size)
+        val_sdf_cache = preprocess_all_unique_sdfs_parallel(scene_mappings['val_scenes'], dataset, model, device, args.sdf_batch_size)
         preprocessing_time = time.time() - start_time
         
         print(f"SDF preprocessing time: {preprocessing_time:.2f}s")
