@@ -54,31 +54,40 @@ class GQEstimator(nn.Module):
         """
         Encodes the SDF into a flat feature vector.
         args:
-            sdf: (48, 48, 48)
-        returns: (flattened_size)
+            sdf: (B, 48, 48, 48) or (48, 48, 48) for single sample
+        returns: (B, flattened_size) or (flattened_size) for single sample
         """
-        # Add channel dimension
-        sdf = sdf.unsqueeze(0)
+        # Handle both single samples and batches
+        if sdf.dim() == 3:
+            # Single sample: (48, 48, 48) -> (1, 1, 48, 48, 48)
+            sdf = sdf.unsqueeze(0).unsqueeze(0)
+            single_sample = True
+        else:
+            # Batch: (B, 48, 48, 48) -> (B, 1, 48, 48, 48)
+            sdf = sdf.unsqueeze(1)
+            single_sample = False
 
-        # Get features (channel_dim, D, D, D)
+        # Get features (B, channel_dim, D, D, D)
         features = self.conv_block(sdf)
 
-        # Flatten (channel_dim, D, D, D) -> (flattened_size,)
-        return features.view(-1)
+        # Flatten (B, channel_dim, D, D, D) -> (B, flattened_size)
+        batch_size = features.shape[0]
+        features = features.view(batch_size, -1)
+        
+        # Return appropriate shape
+        if single_sample:
+            return features.squeeze(0)  # (flattened_size,)
+        else:
+            return features  # (B, flattened_size)
 
     def forward(self, x):
         """
-        Processes a batch of SDFs and hand poses to predict grasp quality.
-        This is not the most efficient way for this specific training problem
-        but it's a standard batch-aware forward pass.
+        Processes a batch of concatenated SDF features and hand poses to predict grasp quality.
         args:
-            flattened_features: (B, flattened_size)
+            x: (B, flattened_size + 19) - concatenated SDF features and grasp parameters
         returns: grasp_quality (B,)
         """
-
         grasp_quality = self.gq_head(x)
-
         # Reshape: (B, 1) -> (B,)
         grasp_quality = grasp_quality.view(-1)
-
         return grasp_quality
