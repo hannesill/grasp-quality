@@ -111,9 +111,11 @@ class OptimizedGraspDataset(Dataset):
         else:
             self.grasp_indices = list(range(len(self.grasp_locations)))
 
-        # Cache for loaded scenes to avoid repeated file I/O
+        # MUCH larger cache for better performance
         self._scene_cache = {}
-        self._cache_size_limit = 100  # Increase cache size since we're more efficient now
+        self._cache_size_limit = 1000  # Increased from 100
+        self._sdf_cache = {}  # Separate SDF cache
+        self._sdf_cache_limit = 500
 
     def _load_scene(self, scene_idx):
         """Load scene data with caching."""
@@ -138,9 +140,23 @@ class OptimizedGraspDataset(Dataset):
         return scene
 
     def get_sdf(self, scene_idx):
-        """Get SDF for a specific scene index."""
+        """Get SDF with enhanced caching."""
+        if scene_idx in self._sdf_cache:
+            return self._sdf_cache[scene_idx]
+        
+        # Load SDF
         scene = self._load_scene(scene_idx)
-        return scene['sdf']
+        sdf = scene['sdf']
+        
+        # Cache SDF separately
+        if len(self._sdf_cache) >= self._sdf_cache_limit:
+            # Remove oldest half
+            old_keys = list(self._sdf_cache.keys())[:len(self._sdf_cache)//2]
+            for key in old_keys:
+                del self._sdf_cache[key]
+        
+        self._sdf_cache[scene_idx] = sdf
+        return sdf
 
     def __len__(self):
         return len(self.grasp_locations)
