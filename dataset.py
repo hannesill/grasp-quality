@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, IterableDataset
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import zipfile
 
 class SceneDataset(Dataset):
     def __init__(self, data_path):
@@ -129,12 +130,31 @@ class OptimizedGraspDataset(Dataset):
             for key in keys_to_remove:
                 del self._scene_cache[key]
         
-        with np.load(self.data_files[scene_idx]) as scene_data:
-            scene = {
-                'sdf': torch.from_numpy(scene_data["sdf"]).float(),
-                'grasps': torch.from_numpy(scene_data["grasps"]).float(),
-                'scores': torch.from_numpy(scene_data["scores"]).float()
-            }
+        try:
+            with np.load(self.data_files[scene_idx]) as scene_data:
+                scene = {
+                    'sdf': torch.from_numpy(scene_data["sdf"]).float(),
+                    'grasps': torch.from_numpy(scene_data["grasps"]).float(),
+                    'scores': torch.from_numpy(scene_data["scores"]).float()
+                }
+        except (zipfile.BadZipFile, OSError, ValueError) as e:
+            print(f"Warning: Corrupted data file {self.data_files[scene_idx]}: {e}")
+            # Find a valid replacement scene
+            for fallback_idx in range(len(self.data_files)):
+                if fallback_idx != scene_idx:
+                    try:
+                        with np.load(self.data_files[fallback_idx]) as fallback_data:
+                            scene = {
+                                'sdf': torch.from_numpy(fallback_data["sdf"]).float(),
+                                'grasps': torch.from_numpy(fallback_data["grasps"]).float(),
+                                'scores': torch.from_numpy(fallback_data["scores"]).float()
+                            }
+                            print(f"Using fallback scene {fallback_idx} instead of {scene_idx}")
+                            break
+                    except (zipfile.BadZipFile, OSError, ValueError):
+                        continue
+            else:
+                raise RuntimeError(f"Could not find any valid scene data files")
         
         self._scene_cache[scene_idx] = scene
         return scene

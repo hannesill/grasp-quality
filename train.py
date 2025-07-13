@@ -4,7 +4,10 @@ import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
-from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import numpy as np
@@ -117,7 +120,13 @@ def main(args):
     criterion = torch.nn.MSELoss()
     
     # Mixed precision training
-    scaler = GradScaler() if device.type == 'cuda' and args.mixed_precision else None
+    if device.type == 'cuda' and args.mixed_precision:
+        try:
+            scaler = GradScaler('cuda')  # New PyTorch API
+        except TypeError:
+            scaler = GradScaler()  # Fallback to old API
+    else:
+        scaler = None
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -170,9 +179,14 @@ def main(args):
             # === FORWARD PASS (including SDF encoding) ===
             forward_start = time.time()
             if scaler is not None:
-                with autocast():
-                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                    loss = criterion(pred_quality, score_batch)
+                try:
+                    with autocast('cuda'):  # New PyTorch API
+                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                        loss = criterion(pred_quality, score_batch)
+                except TypeError:
+                    with autocast():  # Fallback to old API
+                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                        loss = criterion(pred_quality, score_batch)
             else:
                 pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
                 loss = criterion(pred_quality, score_batch)
@@ -225,9 +239,14 @@ def main(args):
                 
                 # Forward pass
                 if scaler is not None:
-                    with autocast():
-                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                        loss = criterion(pred_quality, score_batch)
+                    try:
+                        with autocast('cuda'):  # New PyTorch API
+                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                            loss = criterion(pred_quality, score_batch)
+                    except TypeError:
+                        with autocast():  # Fallback to old API
+                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                            loss = criterion(pred_quality, score_batch)
                 else:
                     pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
                     loss = criterion(pred_quality, score_batch)
