@@ -158,6 +158,48 @@ class OptimizedGraspDataset(Dataset):
         self._sdf_cache[scene_idx] = sdf
         return sdf
 
+    def batch_get_sdf(self, scene_indices):
+        """
+        Efficiently load multiple SDFs at once.
+        Args:
+            scene_indices: List or tensor of scene indices
+        Returns:
+            torch.Tensor: Stacked SDFs of shape (batch_size, 48, 48, 48)
+        """
+        if isinstance(scene_indices, torch.Tensor):
+            scene_indices = scene_indices.cpu().numpy()
+        
+        sdf_list = []
+        uncached_indices = []
+        cached_sdfs = {}
+        
+        # First, collect all cached SDFs
+        for i, scene_idx in enumerate(scene_indices):
+            scene_idx = int(scene_idx)
+            if scene_idx in self._sdf_cache:
+                cached_sdfs[i] = self._sdf_cache[scene_idx]
+            else:
+                uncached_indices.append((i, scene_idx))
+        
+        # Batch load uncached SDFs
+        for i, scene_idx in uncached_indices:
+            scene = self._load_scene(scene_idx)
+            sdf = scene['sdf']
+            
+            # Cache the SDF
+            if len(self._sdf_cache) >= self._sdf_cache_limit:
+                # Remove oldest half
+                old_keys = list(self._sdf_cache.keys())[:len(self._sdf_cache)//2]
+                for key in old_keys:
+                    del self._sdf_cache[key]
+            
+            self._sdf_cache[scene_idx] = sdf
+            cached_sdfs[i] = sdf
+        
+        # Reconstruct the batch in correct order
+        sdf_list = [cached_sdfs[i] for i in range(len(scene_indices))]
+        return torch.stack(sdf_list)
+
     def __len__(self):
         return len(self.grasp_locations)
 

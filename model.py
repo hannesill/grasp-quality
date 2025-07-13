@@ -91,3 +91,20 @@ class GQEstimator(nn.Module):
         # Reshape: (B, 1) -> (B,)
         grasp_quality = grasp_quality.view(-1)
         return grasp_quality
+
+    def forward_with_sdf(self, sdf_batch, grasp_batch):
+        """
+        Efficiently processes SDF and grasp data together.
+        args:
+            sdf_batch: (B, 48, 48, 48) - batch of SDFs
+            grasp_batch: (B, 19) - batch of grasp parameters
+        returns: grasp_quality (B,)
+        """
+        # Encode SDFs
+        sdf_features = self.encode_sdf(sdf_batch)
+        
+        # Concatenate features and forward pass
+        flattened_features = torch.cat([sdf_features, grasp_batch], dim=1)
+        grasp_quality = self.gq_head(flattened_features)
+        
+        return grasp_quality.view(-1)

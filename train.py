@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import numpy as np
@@ -19,14 +20,15 @@ def parse_args():
     parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
     parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
     parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers in the head')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size (increased for better GPU utilization)')
+    parser.add_argument('--num_workers', type=int, default=8, help='Number of dataloader workers (optimized for multi-core systems)')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
+    parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -77,30 +79,45 @@ def main(args):
     val_set = Subset(dataset, val_indices)
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
 
-    # Create simple DataLoaders
+    # Create optimized DataLoaders for GPU training
+    num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
     train_loader = DataLoader(
         train_set, 
         batch_size=args.batch_size, 
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True,
+        persistent_workers=num_workers > 0,
         shuffle=True,
-        prefetch_factor=2
+        prefetch_factor=4 if num_workers > 0 else 2,
+        drop_last=True  # Ensures consistent batch sizes for better GPU utilization
     )
     val_loader = DataLoader(
         val_set, 
         batch_size=args.batch_size, 
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True,
-        shuffle=True,
-        prefetch_factor=2
+        persistent_workers=num_workers > 0,
+        shuffle=False,  # No need to shuffle validation data
+        prefetch_factor=4 if num_workers > 0 else 2,
+        drop_last=False
     )
 
     # --- Model, Optimizer, Loss ---
     model = GQEstimator(input_size=48, base_channels=args.base_channels, fc_dims=args.fc_dims).to(device)
+    
+    # Use PyTorch 2.0 compile if available for additional speedup
+    if hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model)
+            print("Model compiled with PyTorch 2.0 for additional speedup")
+        except Exception as e:
+            print(f"Could not compile model: {e}")
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = torch.nn.MSELoss()
+    
+    # Mixed precision training
+    scaler = GradScaler() if device.type == 'cuda' and args.mixed_precision else None
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -128,7 +145,6 @@ def main(args):
         # Timing variables
         data_loading_time = 0
         sdf_loading_time = 0
-        sdf_encoding_time = 0
         forward_pass_time = 0
         backward_pass_time = 0
         
@@ -147,37 +163,40 @@ def main(args):
             
             # === SDF LOADING ===
             sdf_load_start = time.time()
-            # Load SDFs from disk (naive approach)
-            sdf_list = []
-            for scene_idx in scene_indices:
-                sdf = dataset.get_sdf(scene_idx.item())
-                sdf_list.append(sdf)
-            sdf_batch = torch.stack(sdf_list).to(device)
+            # Batch load SDFs efficiently
+            sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
             sdf_loading_time += time.time() - sdf_load_start
             
-            # === SDF ENCODING ===
-            sdf_encode_start = time.time()
-            sdf_features_batch = model.encode_sdf(sdf_batch)
-            sdf_encoding_time += time.time() - sdf_encode_start
-            
-            # === FORWARD PASS ===
+            # === FORWARD PASS (including SDF encoding) ===
             forward_start = time.time()
-            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-            pred_quality = model(flattened_features)
-            loss = criterion(pred_quality, score_batch)
+            if scaler is not None:
+                with autocast():
+                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                    loss = criterion(pred_quality, score_batch)
+            else:
+                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                loss = criterion(pred_quality, score_batch)
             forward_pass_time += time.time() - forward_start
             
             # === BACKWARD PASS ===
             backward_start = time.time()
             optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
-            total_train_loss += loss.item() * sdf_features_batch.size(0)
-            num_train_samples += sdf_features_batch.size(0)
+            total_train_loss += loss.item() * sdf_batch.size(0)
+            num_train_samples += sdf_batch.size(0)
             
             running_loss = total_train_loss / num_train_samples
             batch_time = time.time() - batch_start_time
@@ -202,20 +221,19 @@ def main(args):
                 score_batch = batch['score'].to(device)
                 
                 # Load SDFs
-                sdf_list = []
-                for scene_idx in scene_indices:
-                    sdf = dataset.get_sdf(scene_idx.item())
-                    sdf_list.append(sdf)
-                sdf_batch = torch.stack(sdf_list).to(device)
+                sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
                 
                 # Forward pass
-                sdf_features_batch = model.encode_sdf(sdf_batch)
-                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                pred_quality = model(flattened_features)
-                loss = criterion(pred_quality, score_batch)
+                if scaler is not None:
+                    with autocast():
+                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                        loss = criterion(pred_quality, score_batch)
+                else:
+                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                    loss = criterion(pred_quality, score_batch)
 
-                total_val_loss += loss.item() * sdf_features_batch.size(0)
-                num_val_samples += sdf_features_batch.size(0)
+                total_val_loss += loss.item() * sdf_batch.size(0)
+                num_val_samples += sdf_batch.size(0)
                 
                 running_val_loss = total_val_loss / num_val_samples
                 pbar_val.set_postfix(val_loss=f'{running_val_loss:.4f}')
@@ -235,8 +253,7 @@ def main(args):
         print(f"\nTraining timing breakdown:")
         print(f"  Data loading: {data_loading_time:.2f}s ({data_loading_time/training_time*100:.1f}%)")
         print(f"  SDF loading: {sdf_loading_time:.2f}s ({sdf_loading_time/training_time*100:.1f}%)")
-        print(f"  SDF encoding: {sdf_encoding_time:.2f}s ({sdf_encoding_time/training_time*100:.1f}%)")
-        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
+        print(f"  Forward pass (inc. SDF encoding): {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
         # Step the scheduler
@@ -263,7 +280,6 @@ def main(args):
             "timing/validation_total": validation_time,
             "timing/data_loading": data_loading_time,
             "timing/sdf_loading": sdf_loading_time,
-            "timing/sdf_encoding": sdf_encoding_time,
             "timing/forward_pass": forward_pass_time,
             "timing/backward_pass": backward_pass_time,
         })
