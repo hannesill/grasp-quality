@@ -386,3 +386,68 @@ class PreEncodedGraspDataset(Dataset):
         for idx in range(len(self)):
             yield self[idx]
                 
+
+class CachedGraspDataset(Dataset):
+    """
+    Clean dataset that works with pre-encoded SDF features.
+    No model dependency - just handles pre-computed features.
+    """
+    def __init__(self, data_path, shuffle_grasps=True):
+        super().__init__()
+        self.data_path = data_path
+        self.data_files = [dir / 'scene.npz' for dir in data_path.iterdir() 
+                          if dir.is_dir() and (dir / 'scene.npz').exists()]
+        
+        # Create list of (scene_idx, grasp_idx) tuples
+        self.grasp_locations = [(scene_idx, grasp_idx) 
+                               for scene_idx in range(len(self.data_files)) 
+                               for grasp_idx in range(480)]
+        
+        # Caches - populated by training script
+        self.sdf_features_cache = {}
+        self.grasp_score_cache = {}
+    
+    def update_caches(self, sdf_features_cache, grasp_score_cache):
+        """Update caches from training script."""
+        self.sdf_features_cache = sdf_features_cache
+        self.grasp_score_cache = grasp_score_cache
+    
+    def load_scene_data(self, scene_idx):
+        """Public method for training script to load raw data."""
+        try:
+            with np.load(self.data_files[scene_idx]) as scene_data:
+                sdf = torch.from_numpy(scene_data["sdf"]).float()
+                grasps = torch.from_numpy(scene_data["grasps"]).float()
+                scores = torch.from_numpy(scene_data["scores"]).float()
+                return sdf, grasps, scores
+        except (zipfile.BadZipFile, OSError, ValueError) as e:
+            # Find a valid replacement
+            for fallback_idx in range(len(self.data_files)):
+                if fallback_idx != scene_idx:
+                    try:
+                        with np.load(self.data_files[fallback_idx]) as fallback_data:
+                            sdf = torch.from_numpy(fallback_data["sdf"]).float()
+                            grasps = torch.from_numpy(fallback_data["grasps"]).float()
+                            scores = torch.from_numpy(fallback_data["scores"]).float()
+                            return sdf, grasps, scores
+                    except (zipfile.BadZipFile, OSError, ValueError):
+                        continue
+            raise RuntimeError(f"Could not find any valid scene data files")
+
+    def __getitem__(self, idx):
+        scene_idx, grasp_idx = self.grasp_locations[idx]
+        sdf_features = self.sdf_features_cache[scene_idx]
+        grasps, scores = self.grasp_score_cache[scene_idx]
+        
+        return {
+            "sdf_features": sdf_features,
+            "grasp": grasps[grasp_idx],
+            "score": scores[grasp_idx],
+            "scene_idx": scene_idx,
+            "grasp_idx": grasp_idx
+        }
+    
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self[idx]
+                

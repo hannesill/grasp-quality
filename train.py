@@ -4,15 +4,11 @@ import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
-try:
-    from torch.amp import autocast, GradScaler
-except ImportError:
-    from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import OptimizedGraspDataset, PreEncodedGraspDataset
+from dataset import CachedGraspDataset
 from model import GQEstimator, GQEstimatorLarge
 
 def parse_args():
@@ -22,20 +18,20 @@ def parse_args():
     parser.add_argument('--train_size', type=int, default=5000, help='Number of training samples')
     parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
     parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers in the head')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size (increased for better GPU utilization)')
-    parser.add_argument('--num_workers', type=int, default=8, help='Number of dataloader workers (optimized for multi-core systems)')
+    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--num_workers', type=int, default=8, help='Number of dataloader workers')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
-    parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
-    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization (more parameters)')
+    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization')
     return parser.parse_args()
 
 class EarlyStopping:
+    """Early stopping utility to prevent overfitting."""
     def __init__(self, patience=15, min_delta=0.01):
         self.patience = patience
         self.min_delta = min_delta
@@ -50,13 +46,138 @@ class EarlyStopping:
             self.counter += 1
         return self.counter >= self.patience
 
-def main(args):
+def pre_encode_sdfs(model, dataset, scene_indices, device, batch_size=128):
+    """
+    Pre-encode all unique SDFs needed for this epoch with detailed timing and progress tracking.
     
+    Args:
+        model: The neural network model with encode_sdf method
+        dataset: Dataset with load_scene_data method
+        scene_indices: List of scene indices to pre-encode
+        device: CUDA/CPU device
+        batch_size: Number of SDFs to encode in each batch
+    
+    Returns:
+        Detailed timing information for performance analysis
+    """
+    # === SETUP PHASE ===
+    setup_start = time.time()
+    unique_scene_indices = list(set(scene_indices))
+    sdf_features_cache = {}
+    grasp_score_cache = {}
+    
+    print(f"Pre-encoding {len(unique_scene_indices)} unique SDFs (batch_size={batch_size})...")
+    setup_time = time.time() - setup_start
+    
+    # === DETAILED TIMING VARIABLES ===
+    total_loading_time = 0
+    total_encoding_time = 0
+    total_caching_time = 0
+    corrupted_scenes = 0
+    
+    # === PRE-ENCODING LOOP WITH PROGRESS BAR ===
+    encoding_start = time.time()
+    
+    with torch.no_grad():
+        # Create progress bar for pre-encoding
+        pbar = tqdm(
+            range(0, len(unique_scene_indices), batch_size),
+            desc="Pre-encoding SDFs",
+            unit="batch",
+            total=(len(unique_scene_indices) + batch_size - 1) // batch_size
+        )
+        
+        for i in pbar:
+            batch_start = time.time()
+            batch_indices = unique_scene_indices[i:i+batch_size]
+            
+            # === LOADING PHASE ===
+            loading_start = time.time()
+            sdf_batch = []
+            valid_indices = []
+            
+            for scene_idx in batch_indices:
+                try:
+                    sdf, grasps, scores = dataset.load_scene_data(scene_idx)
+                    sdf_batch.append(sdf)
+                    valid_indices.append(scene_idx)
+                    grasp_score_cache[scene_idx] = (grasps, scores)
+                except Exception as e:
+                    corrupted_scenes += 1
+                    continue
+            
+            loading_time = time.time() - loading_start
+            total_loading_time += loading_time
+            
+            # === ENCODING PHASE ===
+            if sdf_batch:
+                encoding_batch_start = time.time()
+                
+                # Move to GPU and encode
+                sdf_tensor = torch.stack(sdf_batch).to(device)
+                encoded_features = model.encode_sdf(sdf_tensor)
+                
+                encoding_batch_time = time.time() - encoding_batch_start
+                total_encoding_time += encoding_batch_time
+                
+                # === CACHING PHASE ===
+                caching_start = time.time()
+                
+                # Store on CPU for multiprocessing compatibility
+                for j, scene_idx in enumerate(valid_indices):
+                    sdf_features_cache[scene_idx] = encoded_features[j].cpu()
+                
+                caching_time = time.time() - caching_start
+                total_caching_time += caching_time
+            
+            # Update progress bar with current batch timing
+            batch_time = time.time() - batch_start
+            pbar.set_postfix({
+                'batch_time': f'{batch_time:.2f}s',
+                'loading': f'{loading_time:.2f}s',
+                'encoding': f'{encoding_batch_time:.2f}s' if sdf_batch else '0.00s',
+                'cached': len(sdf_features_cache)
+            })
+    
+    total_encoding_time_all = time.time() - encoding_start
+    
+    # === CACHE UPDATE PHASE ===
+    cache_update_start = time.time()
+    dataset.update_caches(sdf_features_cache, grasp_score_cache)
+    cache_update_time = time.time() - cache_update_start
+    
+    # === DETAILED TIMING REPORT ===
+    total_preencoding_time = time.time() - setup_start + setup_time
+    
+    print(f"\n=== PRE-ENCODING TIMING BREAKDOWN ===")
+    print(f"Total pre-encoding time: {total_preencoding_time:.2f}s")
+    print(f"  Setup time: {setup_time:.3f}s ({setup_time/total_preencoding_time*100:.1f}%)")
+    print(f"  Data loading: {total_loading_time:.2f}s ({total_loading_time/total_preencoding_time*100:.1f}%)")
+    print(f"  SDF encoding: {total_encoding_time:.2f}s ({total_encoding_time/total_preencoding_time*100:.1f}%)")
+    print(f"  Feature caching: {total_caching_time:.2f}s ({total_caching_time/total_preencoding_time*100:.1f}%)")
+    print(f"  Cache update: {cache_update_time:.3f}s ({cache_update_time/total_preencoding_time*100:.1f}%)")
+    print(f"Successfully cached {len(sdf_features_cache)} SDF features")
+    if corrupted_scenes > 0:
+        print(f"⚠️  Skipped {corrupted_scenes} corrupted scenes")
+    
+    # Return timing information for logging
+    return {
+        'total_time': total_preencoding_time,
+        'setup_time': setup_time,
+        'loading_time': total_loading_time,
+        'encoding_time': total_encoding_time,
+        'caching_time': total_caching_time,
+        'cache_update_time': cache_update_time,
+        'scenes_processed': len(sdf_features_cache),
+        'corrupted_scenes': corrupted_scenes
+    }
+
+def main(args):
     # --- Device Setup ---
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # --- Model Creation (needed for PreEncodedGraspDataset) ---
+    # --- Model Creation ---
     if args.use_large_model:
         # Use larger model for better A100 utilization
         model = GQEstimatorLarge(
@@ -64,6 +185,7 @@ def main(args):
             base_channels=args.base_channels, 
             fc_dims=args.fc_dims
         ).to(device)
+        print("Using GQEstimatorLarge for better GPU utilization")
     else:
         # Use standard model
         model = GQEstimator(
@@ -71,44 +193,34 @@ def main(args):
             base_channels=args.base_channels, 
             fc_dims=args.fc_dims
         ).to(device)
+        print("Using standard GQEstimator")
     
-    # --- Dataset and Dataloaders ---
-    data_path = Path(args.data_path)
+    # --- Dataset Creation ---
+    dataset = CachedGraspDataset(Path(args.data_path))
+    print(f"Loaded dataset with {len(dataset.data_files)} scenes")
     
-    # Use pre-encoding strategy for maximum speed
-    dataset = PreEncodedGraspDataset(data_path, model, device)
-    print("Using PreEncodedGraspDataset for ultra-fast training!")
-
+    # --- Train/Val Splits ---
     num_samples = len(dataset)
-    print(f"Total samples: {num_samples}")
-
-    # Create indices and shuffle
     indices = list(range(num_samples))
-    random.seed(42)
+    random.seed(42)  # For reproducible splits
     random.shuffle(indices)
-
-    # Split into train and validation
-    train_indices = indices[:args.train_size]
-    val_indices = indices[-args.val_size:]
-
-    train_set = Subset(dataset, train_indices)
-    val_set = Subset(dataset, val_indices)
+    
+    train_set = Subset(dataset, indices[:args.train_size])
+    val_set = Subset(dataset, indices[-args.val_size:])
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
-
-    # Create optimized DataLoaders for GPU training
-    # Use full parallelism - pre-encoded features are stored on CPU so multiprocessing is safe
+    
+    # --- DataLoaders ---
     num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
-    print(f"Using {num_workers} workers for pre-encoding mode (features cached on CPU for safe multiprocessing)")
-
-    # Create DataLoaders
+    print(f"Using {num_workers} workers for data loading")
+    
     train_loader = DataLoader(
         train_set, 
         batch_size=args.batch_size, 
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True,
+        persistent_workers=num_workers > 0,
         shuffle=True,
-        prefetch_factor=4,
+        prefetch_factor=4 if num_workers > 0 else 2,
         drop_last=True  # Ensures consistent batch sizes for better GPU utilization
     )
     val_loader = DataLoader(
@@ -116,42 +228,27 @@ def main(args):
         batch_size=args.batch_size, 
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True,
+        persistent_workers=num_workers > 0,
         shuffle=False,  # No need to shuffle validation data
-        prefetch_factor=4,
+        prefetch_factor=4 if num_workers > 0 else 2,
         drop_last=False
     )
-
-    # --- Model Optimization ---
     
-    # Use PyTorch 2.0 compile if available for additional speedup
+    # --- Training Setup ---
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    criterion = torch.nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10)
+    early_stopping = EarlyStopping(patience=args.early_stopping_patience)
+    
+    # --- Model Optimization ---
+    # PyTorch 2.0 compilation for additional speedup
     if hasattr(torch, 'compile'):
         try:
             model = torch.compile(model)
-            print("Model compiled with PyTorch 2.0 for additional speedup")
+            print("✅ Model compiled with PyTorch 2.0 for additional speedup")
         except Exception as e:
-            print(f"Could not compile model: {e}")
+            print(f"⚠️  Could not compile model: {e}")
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = torch.nn.MSELoss()
-    
-    # Mixed precision training
-    if device.type == 'cuda' and args.mixed_precision:
-        try:
-            scaler = GradScaler('cuda')  # New PyTorch API
-        except TypeError:
-            scaler = GradScaler()  # Fallback to old API
-    else:
-        scaler = None
-    
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.7, patience=10
-    )
-    
-    # Early stopping
-    early_stopping = EarlyStopping(patience=args.early_stopping_patience)
-
     # --- WandB Initialization ---
     wandb.init(
         entity=args.wandb_entity,
@@ -160,7 +257,7 @@ def main(args):
         config=args
     )
     wandb.watch(model, criterion, log="all", log_freq=100)
-
+    
     # --- Training Loop ---
     print(f"Starting training for {args.epochs} epochs...")
     best_val_loss = float('inf')
@@ -170,28 +267,20 @@ def main(args):
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
         # === PRE-ENCODE SDFS FOR THIS EPOCH ===
-        print("Pre-encoding SDFs for ultra-fast training...")
-        preencoding_start = time.time()
-        
         # Get all scene indices needed for this epoch
         train_scene_indices = [dataset.grasp_locations[train_set.indices[i]][0] for i in range(len(train_set))]
         val_scene_indices = [dataset.grasp_locations[val_set.indices[i]][0] for i in range(len(val_set))]
         all_scene_indices = train_scene_indices + val_scene_indices
         
-        # Pre-encode all unique SDFs for this epoch
-        dataset.pre_encode_epoch(all_scene_indices)
-        preencoding_time = time.time() - preencoding_start
-        print(f"Pre-encoding completed in {preencoding_time:.2f}s")
+        # Pre-encode with detailed timing
+        preencoding_timing = pre_encode_sdfs(model, dataset, all_scene_indices, device)
         
-        # === TRAINING ===
+        # === TRAINING PHASE ===
         model.train()
         total_train_loss = 0
         num_train_samples = 0
         
-        # Initialize gradients
-        optimizer.zero_grad()
-        
-        # Timing variables
+        # Timing variables for training
         data_loading_time = 0
         sdf_loading_time = 0
         forward_pass_time = 0
@@ -202,6 +291,7 @@ def main(args):
         
         for batch_idx, batch in enumerate(pbar):
             batch_start_time = time.time()
+            optimizer.zero_grad()
             
             # === DATA LOADING ===
             data_start = time.time()
@@ -209,45 +299,23 @@ def main(args):
             score_batch = batch['score'].to(device)
             data_loading_time += time.time() - data_start
             
-            # === INSTANT SDF FEATURE LOOKUP ===
+            # === SDF FEATURE LOOKUP ===
             sdf_load_start = time.time()
             sdf_features_batch = batch['sdf_features'].to(device)  # Pre-encoded features
             sdf_loading_time += time.time() - sdf_load_start
             
-            # === FORWARD PASS (no SDF encoding needed) ===
+            # === FORWARD PASS ===
             forward_start = time.time()
-            if scaler is not None:
-                try:
-                    with autocast('cuda'):  # New PyTorch API
-                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                        pred_quality = model(flattened_features)
-                        loss = criterion(pred_quality, score_batch)
-                except TypeError:
-                    with autocast():  # Fallback to old API
-                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                        pred_quality = model(flattened_features)
-                        loss = criterion(pred_quality, score_batch)
-            else:
-                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                pred_quality = model(flattened_features)
-                loss = criterion(pred_quality, score_batch)
+            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+            pred_quality = model(flattened_features)
+            loss = criterion(pred_quality, score_batch)
             forward_pass_time += time.time() - forward_start
             
             # === BACKWARD PASS ===
             backward_start = time.time()
-            
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping for stability
+            optimizer.step()
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
@@ -263,7 +331,7 @@ def main(args):
         avg_train_loss = total_train_loss / num_train_samples
         training_time = time.time() - training_start_time
         
-        # === VALIDATION ===
+        # === VALIDATION PHASE ===
         model.eval()
         total_val_loss = 0
         num_val_samples = 0
@@ -272,29 +340,15 @@ def main(args):
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
-                # Simple validation forward pass
+                # Validation forward pass
                 grasp_batch = batch['grasp'].to(device)
                 score_batch = batch['score'].to(device)
-                
-                # Use pre-encoded features
                 sdf_features_batch = batch['sdf_features'].to(device)
                 
                 # Forward pass
-                if scaler is not None:
-                    try:
-                        with autocast('cuda'):  # New PyTorch API
-                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                            pred_quality = model(flattened_features)
-                            loss = criterion(pred_quality, score_batch)
-                    except TypeError:
-                        with autocast():  # Fallback to old API
-                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                            pred_quality = model(flattened_features)
-                            loss = criterion(pred_quality, score_batch)
-                else:
-                    flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                    pred_quality = model(flattened_features)
-                    loss = criterion(pred_quality, score_batch)
+                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                pred_quality = model(flattened_features)
+                loss = criterion(pred_quality, score_batch)
 
                 batch_size = grasp_batch.size(0)
                 total_val_loss += loss.item() * batch_size
@@ -309,22 +363,21 @@ def main(args):
         # Total epoch time
         epoch_time = time.time() - epoch_start_time
         
-        # === TIMING BREAKDOWN ===
+        # === COMPREHENSIVE TIMING BREAKDOWN ===
         print(f"\n=== EPOCH {epoch+1} TIMING BREAKDOWN ===")
         print(f"Total epoch time: {epoch_time:.2f}s")
+        print(f"Pre-encoding time: {preencoding_timing['total_time']:.2f}s ({preencoding_timing['total_time']/epoch_time*100:.1f}%)")
         print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
         print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
         
-        print(f"\nTraining timing breakdown:")
+        print(f"\nTraining phase breakdown:")
         print(f"  Data loading: {data_loading_time:.2f}s ({data_loading_time/training_time*100:.1f}%)")
-        print(f"  SDF loading: {sdf_loading_time:.2f}s ({sdf_loading_time/training_time*100:.1f}%)")
-        print(f"  Forward pass (inc. SDF encoding): {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
+        print(f"  SDF feature lookup: {sdf_loading_time:.2f}s ({sdf_loading_time/training_time*100:.1f}%)")
+        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
         # Step the scheduler
         scheduler.step(avg_val_loss)
-        
-        # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f'\nEpoch [{epoch+1}/{args.epochs}], LR: {current_lr:.2e}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
@@ -333,25 +386,32 @@ def main(args):
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), 'best_model.pth')
+            print(f"✅ New best model saved! Val Loss: {avg_val_loss:.4f}")
         
-        # Log to wandb
+        # Log to wandb with detailed timing
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
             "learning_rate": current_lr,
             "timing/epoch_total": epoch_time,
+            "timing/preencoding_total": preencoding_timing['total_time'],
+            "timing/preencoding_loading": preencoding_timing['loading_time'],
+            "timing/preencoding_encoding": preencoding_timing['encoding_time'],
+            "timing/preencoding_caching": preencoding_timing['caching_time'],
             "timing/training_total": training_time,
             "timing/validation_total": validation_time,
             "timing/data_loading": data_loading_time,
             "timing/sdf_loading": sdf_loading_time,
             "timing/forward_pass": forward_pass_time,
             "timing/backward_pass": backward_pass_time,
+            "preencoding/scenes_processed": preencoding_timing['scenes_processed'],
+            "preencoding/corrupted_scenes": preencoding_timing['corrupted_scenes'],
         })
         
         # Early stopping check
         if early_stopping(avg_val_loss):
-            print(f"Early stopping triggered at epoch {epoch+1}")
+            print(f"🛑 Early stopping triggered at epoch {epoch+1}")
             break
 
     # --- Save Final Model ---
