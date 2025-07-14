@@ -434,6 +434,9 @@ class CachedGraspDataset(Dataset):
                         continue
             raise RuntimeError(f"Could not find any valid scene data files")
 
+    def __len__(self):
+        return len(self.grasp_locations)
+
     def __getitem__(self, idx):
         scene_idx, grasp_idx = self.grasp_locations[idx]
         sdf_features = self.sdf_features_cache[scene_idx]
