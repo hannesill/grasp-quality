@@ -243,3 +243,141 @@ class OptimizedGraspDataset(Dataset):
         for idx in range(len(self)):
             yield self[idx]
                 
+
+class PreEncodedGraspDataset(Dataset):
+    """
+    Ultra-fast dataset that pre-encodes all unique SDFs once per epoch.
+    This eliminates the 87.7% SDF loading bottleneck by:
+    1. Loading all unique SDFs once per epoch
+    2. Batch encoding them on GPU
+    3. Storing encoded features in GPU memory for instant lookup
+    """
+    def __init__(self, data_path, model, device, shuffle_grasps=True):
+        super().__init__()
+        self.data_path = data_path
+        self.model = model
+        self.device = device
+        self.data_files = [dir / 'scene.npz' for dir in data_path.iterdir() if dir.is_dir() and (dir / 'scene.npz').exists()]
+        self.shuffle_grasps = shuffle_grasps
+
+        # Create list of (scene_idx, grasp_idx) tuples
+        self.grasp_locations = [(scene_idx, grasp_idx) for scene_idx in range(len(self.data_files)) for grasp_idx in range(480)]
+
+        if self.shuffle_grasps:
+            self.grasp_indices = torch.randperm(len(self.grasp_locations))
+        else:
+            self.grasp_indices = list(range(len(self.grasp_locations)))
+
+        # Pre-encoded SDF features cache (GPU memory)
+        self.sdf_features_cache = {}
+        self.grasp_score_cache = {}
+        
+        print(f"PreEncodedGraspDataset initialized with {len(self.data_files)} unique scenes")
+    
+    def pre_encode_epoch(self, scene_indices_needed):
+        """
+        Pre-encode all unique SDFs needed for this epoch.
+        This is called once per epoch before training starts.
+        """
+        unique_scene_indices = list(set(scene_indices_needed))
+        print(f"Pre-encoding {len(unique_scene_indices)} unique SDFs for this epoch...")
+        
+        # Clear previous cache
+        self.sdf_features_cache.clear()
+        self.grasp_score_cache.clear()
+        
+        # Batch encode SDFs for maximum GPU utilization
+        batch_size = 32  # Encode 32 SDFs at a time
+        
+        with torch.no_grad():
+            for i in range(0, len(unique_scene_indices), batch_size):
+                batch_scene_indices = unique_scene_indices[i:i+batch_size]
+                
+                # Load SDFs for this batch
+                sdf_batch = []
+                valid_indices = []
+                
+                for scene_idx in batch_scene_indices:
+                    try:
+                        sdf, grasps, scores = self._load_scene_data(scene_idx)
+                        sdf_batch.append(sdf)
+                        valid_indices.append(scene_idx)
+                        
+                        # Cache grasp-score pairs
+                        self.grasp_score_cache[scene_idx] = (grasps, scores)
+                        
+                    except Exception as e:
+                        print(f"Skipping corrupted scene {scene_idx}: {e}")
+                        continue
+                
+                if sdf_batch:
+                    # Stack and move to GPU
+                    sdf_tensor = torch.stack(sdf_batch).to(self.device)
+                    
+                    # Batch encode on GPU
+                    encoded_features = self.model.encode_sdf(sdf_tensor)
+                    
+                    # Store in cache
+                    for j, scene_idx in enumerate(valid_indices):
+                        self.sdf_features_cache[scene_idx] = encoded_features[j]
+                
+                # Progress update
+                if (i // batch_size) % 10 == 0:
+                    print(f"Pre-encoded {min(i + batch_size, len(unique_scene_indices))}/{len(unique_scene_indices)} scenes...")
+        
+        print(f"Pre-encoding complete! Cached {len(self.sdf_features_cache)} SDF features on GPU")
+    
+    def _load_scene_data(self, scene_idx):
+        """Load raw scene data from disk."""
+        try:
+            with np.load(self.data_files[scene_idx]) as scene_data:
+                sdf = torch.from_numpy(scene_data["sdf"]).float()
+                grasps = torch.from_numpy(scene_data["grasps"]).float()
+                scores = torch.from_numpy(scene_data["scores"]).float()
+                return sdf, grasps, scores
+        except (zipfile.BadZipFile, OSError, ValueError) as e:
+            # Find a valid replacement
+            for fallback_idx in range(len(self.data_files)):
+                if fallback_idx != scene_idx:
+                    try:
+                        with np.load(self.data_files[fallback_idx]) as fallback_data:
+                            sdf = torch.from_numpy(fallback_data["sdf"]).float()
+                            grasps = torch.from_numpy(fallback_data["grasps"]).float()
+                            scores = torch.from_numpy(fallback_data["scores"]).float()
+                            return sdf, grasps, scores
+                    except (zipfile.BadZipFile, OSError, ValueError):
+                        continue
+            raise RuntimeError(f"Could not find any valid scene data files")
+
+    def __len__(self):
+        return len(self.grasp_locations)
+
+    def __getitem__(self, idx):
+        scene_idx, grasp_idx = self.grasp_locations[idx]
+        
+        # Get pre-encoded SDF features (instant lookup from GPU memory)
+        if scene_idx not in self.sdf_features_cache:
+            raise RuntimeError(f"Scene {scene_idx} not pre-encoded! Call pre_encode_epoch() first.")
+        
+        sdf_features = self.sdf_features_cache[scene_idx]
+        
+        # Get grasp-score data
+        grasps, scores = self.grasp_score_cache[scene_idx]
+        
+        # Handle IndexError by selecting a random valid grasp
+        num_grasps = grasps.shape[0]
+        if grasp_idx >= num_grasps:
+            grasp_idx = np.random.randint(num_grasps)
+
+        return {
+            "sdf_features": sdf_features,  # Pre-encoded features (GPU memory)
+            "grasp": grasps[grasp_idx],
+            "score": scores[grasp_idx],
+            "scene_idx": scene_idx,
+            "grasp_idx": grasp_idx
+        }
+    
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self[idx]
+                

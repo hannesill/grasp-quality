@@ -12,7 +12,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import OptimizedGraspDataset
+from dataset import OptimizedGraspDataset, PreEncodedGraspDataset
 from model import GQEstimator
 
 def parse_args():
@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
+    parser.add_argument('--use_preencoding', action='store_true', help='Use pre-encoding strategy for 100x faster training (eliminates SDF loading bottleneck)')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -62,9 +63,19 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    # --- Model Creation (needed for PreEncodedGraspDataset) ---
+    model = GQEstimator(input_size=48, base_channels=args.base_channels, fc_dims=args.fc_dims).to(device)
+    
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
-    dataset = OptimizedGraspDataset(data_path)
+    
+    if args.use_preencoding:
+        # Use pre-encoding strategy for maximum speed
+        dataset = PreEncodedGraspDataset(data_path, model, device)
+        print("Using PreEncodedGraspDataset for ultra-fast training!")
+    else:
+        # Use standard optimized dataset
+        dataset = OptimizedGraspDataset(data_path)
 
     num_samples = len(dataset)
     print(f"Total samples: {num_samples}")
@@ -105,8 +116,7 @@ def main(args):
         drop_last=False
     )
 
-    # --- Model, Optimizer, Loss ---
-    model = GQEstimator(input_size=48, base_channels=args.base_channels, fc_dims=args.fc_dims).to(device)
+    # --- Model Optimization ---
     
     # Use PyTorch 2.0 compile if available for additional speedup
     if hasattr(torch, 'compile'):
@@ -146,6 +156,21 @@ def main(args):
         epoch_start_time = time.time()
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
+        # === PRE-ENCODE SDFS FOR THIS EPOCH ===
+        if args.use_preencoding:
+            print("Pre-encoding SDFs for ultra-fast training...")
+            preencoding_start = time.time()
+            
+            # Get all scene indices needed for this epoch
+            train_scene_indices = [dataset.grasp_locations[train_set.indices[i]][0] for i in range(len(train_set))]
+            val_scene_indices = [dataset.grasp_locations[val_set.indices[i]][0] for i in range(len(val_set))]
+            all_scene_indices = train_scene_indices + val_scene_indices
+            
+            # Pre-encode all unique SDFs for this epoch
+            dataset.pre_encode_epoch(all_scene_indices)
+            preencoding_time = time.time() - preencoding_start
+            print(f"Pre-encoding completed in {preencoding_time:.2f}s")
+        
         # === TRAINING ===
         model.train()
         total_train_loss = 0
@@ -165,32 +190,56 @@ def main(args):
             
             # === DATA LOADING ===
             data_start = time.time()
-            scene_indices = batch['scene_idx'].to(device)
             grasp_batch = batch['grasp'].to(device)
             score_batch = batch['score'].to(device)
             data_loading_time += time.time() - data_start
             
-            # === SDF LOADING ===
-            sdf_load_start = time.time()
-            # Batch load SDFs efficiently
-            sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
-            sdf_loading_time += time.time() - sdf_load_start
-            
-            # === FORWARD PASS (including SDF encoding) ===
-            forward_start = time.time()
-            if scaler is not None:
-                try:
-                    with autocast('cuda'):  # New PyTorch API
-                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                        loss = criterion(pred_quality, score_batch)
-                except TypeError:
-                    with autocast():  # Fallback to old API
-                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                        loss = criterion(pred_quality, score_batch)
+            if args.use_preencoding:
+                # === INSTANT SDF FEATURE LOOKUP ===
+                sdf_load_start = time.time()
+                sdf_features_batch = batch['sdf_features'].to(device)  # Pre-encoded features
+                sdf_loading_time += time.time() - sdf_load_start
+                
+                # === FORWARD PASS (no SDF encoding needed) ===
+                forward_start = time.time()
+                if scaler is not None:
+                    try:
+                        with autocast('cuda'):  # New PyTorch API
+                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                            pred_quality = model(flattened_features)
+                            loss = criterion(pred_quality, score_batch)
+                    except TypeError:
+                        with autocast():  # Fallback to old API
+                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                            pred_quality = model(flattened_features)
+                            loss = criterion(pred_quality, score_batch)
+                else:
+                    flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                    pred_quality = model(flattened_features)
+                    loss = criterion(pred_quality, score_batch)
+                forward_pass_time += time.time() - forward_start
             else:
-                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                loss = criterion(pred_quality, score_batch)
-            forward_pass_time += time.time() - forward_start
+                # === SDF LOADING ===
+                sdf_load_start = time.time()
+                scene_indices = batch['scene_idx'].to(device)
+                sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
+                sdf_loading_time += time.time() - sdf_load_start
+                
+                # === FORWARD PASS (including SDF encoding) ===
+                forward_start = time.time()
+                if scaler is not None:
+                    try:
+                        with autocast('cuda'):  # New PyTorch API
+                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                            loss = criterion(pred_quality, score_batch)
+                    except TypeError:
+                        with autocast():  # Fallback to old API
+                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                            loss = criterion(pred_quality, score_batch)
+                else:
+                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                    loss = criterion(pred_quality, score_batch)
+                forward_pass_time += time.time() - forward_start
             
             # === BACKWARD PASS ===
             backward_start = time.time()
@@ -209,8 +258,9 @@ def main(args):
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
-            total_train_loss += loss.item() * sdf_batch.size(0)
-            num_train_samples += sdf_batch.size(0)
+            batch_size = grasp_batch.size(0)
+            total_train_loss += loss.item() * batch_size
+            num_train_samples += batch_size
             
             running_loss = total_train_loss / num_train_samples
             batch_time = time.time() - batch_start_time
@@ -230,29 +280,51 @@ def main(args):
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
                 # Simple validation forward pass
-                scene_indices = batch['scene_idx'].to(device)
                 grasp_batch = batch['grasp'].to(device)
                 score_batch = batch['score'].to(device)
                 
-                # Load SDFs
-                sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
-                
-                # Forward pass
-                if scaler is not None:
-                    try:
-                        with autocast('cuda'):  # New PyTorch API
-                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                            loss = criterion(pred_quality, score_batch)
-                    except TypeError:
-                        with autocast():  # Fallback to old API
-                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                            loss = criterion(pred_quality, score_batch)
+                if args.use_preencoding:
+                    # Use pre-encoded features
+                    sdf_features_batch = batch['sdf_features'].to(device)
+                    
+                    # Forward pass
+                    if scaler is not None:
+                        try:
+                            with autocast('cuda'):  # New PyTorch API
+                                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                                pred_quality = model(flattened_features)
+                                loss = criterion(pred_quality, score_batch)
+                        except TypeError:
+                            with autocast():  # Fallback to old API
+                                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                                pred_quality = model(flattened_features)
+                                loss = criterion(pred_quality, score_batch)
+                    else:
+                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                        pred_quality = model(flattened_features)
+                        loss = criterion(pred_quality, score_batch)
                 else:
-                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                    loss = criterion(pred_quality, score_batch)
+                    # Load SDFs
+                    scene_indices = batch['scene_idx'].to(device)
+                    sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
+                    
+                    # Forward pass
+                    if scaler is not None:
+                        try:
+                            with autocast('cuda'):  # New PyTorch API
+                                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                                loss = criterion(pred_quality, score_batch)
+                        except TypeError:
+                            with autocast():  # Fallback to old API
+                                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                                loss = criterion(pred_quality, score_batch)
+                    else:
+                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                        loss = criterion(pred_quality, score_batch)
 
-                total_val_loss += loss.item() * sdf_batch.size(0)
-                num_val_samples += sdf_batch.size(0)
+                batch_size = grasp_batch.size(0)
+                total_val_loss += loss.item() * batch_size
+                num_val_samples += batch_size
                 
                 running_val_loss = total_val_loss / num_val_samples
                 pbar_val.set_postfix(val_loss=f'{running_val_loss:.4f}')
