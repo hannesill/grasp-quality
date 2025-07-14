@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
     parser.add_argument('--use_preencoding', action='store_true', help='Use pre-encoding strategy for 100x faster training (eliminates SDF loading bottleneck)')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Number of gradient accumulation steps for effective larger batch sizes')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -102,26 +103,46 @@ def main(args):
     else:
         num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
         
-    train_loader = DataLoader(
-        train_set, 
-        batch_size=args.batch_size, 
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-        shuffle=True,
-        prefetch_factor=4 if num_workers > 0 else 2,
-        drop_last=True  # Ensures consistent batch sizes for better GPU utilization
-    )
-    val_loader = DataLoader(
-        val_set, 
-        batch_size=args.batch_size, 
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-        shuffle=False,  # No need to shuffle validation data
-        prefetch_factor=4 if num_workers > 0 else 2,
-        drop_last=False
-    )
+    # Configure DataLoader parameters based on num_workers
+    if num_workers > 0:
+        train_loader = DataLoader(
+            train_set, 
+            batch_size=args.batch_size, 
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=True,
+            shuffle=True,
+            prefetch_factor=4,
+            drop_last=True  # Ensures consistent batch sizes for better GPU utilization
+        )
+        val_loader = DataLoader(
+            val_set, 
+            batch_size=args.batch_size, 
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=True,
+            shuffle=False,  # No need to shuffle validation data
+            prefetch_factor=4,
+            drop_last=False
+        )
+    else:
+        # Single-threaded mode (no multiprocessing)
+        train_loader = DataLoader(
+            train_set, 
+            batch_size=args.batch_size, 
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            shuffle=True,
+            drop_last=True  # Ensures consistent batch sizes for better GPU utilization
+        )
+        val_loader = DataLoader(
+            val_set, 
+            batch_size=args.batch_size, 
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            shuffle=False,  # No need to shuffle validation data
+            drop_last=False
+        )
 
     # --- Model Optimization ---
     
@@ -182,6 +203,9 @@ def main(args):
         model.train()
         total_train_loss = 0
         num_train_samples = 0
+        
+        # Initialize gradients
+        optimizer.zero_grad()
         
         # Timing variables
         data_loading_time = 0
@@ -250,18 +274,28 @@ def main(args):
             
             # === BACKWARD PASS ===
             backward_start = time.time()
-            optimizer.zero_grad()
+            
+            # Normalize loss for gradient accumulation
+            loss = loss / args.gradient_accumulation_steps
             
             if scaler is not None:
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
