@@ -32,8 +32,6 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
-    parser.add_argument('--use_preencoding', action='store_true', help='Use pre-encoding strategy for 100x faster training (eliminates SDF loading bottleneck)')
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Number of gradient accumulation steps for effective larger batch sizes')
     parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization (more parameters)')
     return parser.parse_args()
 
@@ -53,14 +51,7 @@ class EarlyStopping:
         return self.counter >= self.patience
 
 def main(args):
-    # --- WandB Initialization ---
-    wandb.init(
-        entity=args.wandb_entity,
-        project=args.project_name,
-        name=args.run_name,
-        config=args
-    )
-
+    
     # --- Device Setup ---
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -84,13 +75,9 @@ def main(args):
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
     
-    if args.use_preencoding:
-        # Use pre-encoding strategy for maximum speed
-        dataset = PreEncodedGraspDataset(data_path, model, device)
-        print("Using PreEncodedGraspDataset for ultra-fast training!")
-    else:
-        # Use standard optimized dataset
-        dataset = OptimizedGraspDataset(data_path)
+    # Use pre-encoding strategy for maximum speed
+    dataset = PreEncodedGraspDataset(data_path, model, device)
+    print("Using PreEncodedGraspDataset for ultra-fast training!")
 
     num_samples = len(dataset)
     print(f"Total samples: {num_samples}")
@@ -111,52 +98,29 @@ def main(args):
     # Create optimized DataLoaders for GPU training
     # Use full parallelism - pre-encoded features are stored on CPU so multiprocessing is safe
     num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
-    
-    if args.use_preencoding:
-        print(f"Using {num_workers} workers for pre-encoding mode (features cached on CPU for safe multiprocessing)")
-    else:
-        print(f"Using {num_workers} workers for standard mode")
-        
-    # Configure DataLoader parameters based on num_workers
-    if num_workers > 0:
-        train_loader = DataLoader(
-            train_set, 
-            batch_size=args.batch_size, 
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=True,
-            shuffle=True,
-            prefetch_factor=4,
-            drop_last=True  # Ensures consistent batch sizes for better GPU utilization
-        )
-        val_loader = DataLoader(
-            val_set, 
-            batch_size=args.batch_size, 
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=True,
-            shuffle=False,  # No need to shuffle validation data
-            prefetch_factor=4,
-            drop_last=False
-        )
-    else:
-        # Single-threaded mode (no multiprocessing)
-        train_loader = DataLoader(
-            train_set, 
-            batch_size=args.batch_size, 
-            num_workers=0,
-            pin_memory=torch.cuda.is_available(),
-            shuffle=True,
-            drop_last=True  # Ensures consistent batch sizes for better GPU utilization
-        )
-        val_loader = DataLoader(
-            val_set, 
-            batch_size=args.batch_size, 
-            num_workers=0,
-            pin_memory=torch.cuda.is_available(),
-            shuffle=False,  # No need to shuffle validation data
-            drop_last=False
-        )
+    print(f"Using {num_workers} workers for pre-encoding mode (features cached on CPU for safe multiprocessing)")
+
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_set, 
+        batch_size=args.batch_size, 
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=True,
+        shuffle=True,
+        prefetch_factor=4,
+        drop_last=True  # Ensures consistent batch sizes for better GPU utilization
+    )
+    val_loader = DataLoader(
+        val_set, 
+        batch_size=args.batch_size, 
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=True,
+        shuffle=False,  # No need to shuffle validation data
+        prefetch_factor=4,
+        drop_last=False
+    )
 
     # --- Model Optimization ---
     
@@ -187,7 +151,14 @@ def main(args):
     
     # Early stopping
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
-    
+
+    # --- WandB Initialization ---
+    wandb.init(
+        entity=args.wandb_entity,
+        project=args.project_name,
+        name=args.run_name,
+        config=args
+    )
     wandb.watch(model, criterion, log="all", log_freq=100)
 
     # --- Training Loop ---
@@ -199,19 +170,18 @@ def main(args):
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
         # === PRE-ENCODE SDFS FOR THIS EPOCH ===
-        if args.use_preencoding:
-            print("Pre-encoding SDFs for ultra-fast training...")
-            preencoding_start = time.time()
-            
-            # Get all scene indices needed for this epoch
-            train_scene_indices = [dataset.grasp_locations[train_set.indices[i]][0] for i in range(len(train_set))]
-            val_scene_indices = [dataset.grasp_locations[val_set.indices[i]][0] for i in range(len(val_set))]
-            all_scene_indices = train_scene_indices + val_scene_indices
-            
-            # Pre-encode all unique SDFs for this epoch
-            dataset.pre_encode_epoch(all_scene_indices)
-            preencoding_time = time.time() - preencoding_start
-            print(f"Pre-encoding completed in {preencoding_time:.2f}s")
+        print("Pre-encoding SDFs for ultra-fast training...")
+        preencoding_start = time.time()
+        
+        # Get all scene indices needed for this epoch
+        train_scene_indices = [dataset.grasp_locations[train_set.indices[i]][0] for i in range(len(train_set))]
+        val_scene_indices = [dataset.grasp_locations[val_set.indices[i]][0] for i in range(len(val_set))]
+        all_scene_indices = train_scene_indices + val_scene_indices
+        
+        # Pre-encode all unique SDFs for this epoch
+        dataset.pre_encode_epoch(all_scene_indices)
+        preencoding_time = time.time() - preencoding_start
+        print(f"Pre-encoding completed in {preencoding_time:.2f}s")
         
         # === TRAINING ===
         model.train()
@@ -239,77 +209,45 @@ def main(args):
             score_batch = batch['score'].to(device)
             data_loading_time += time.time() - data_start
             
-            if args.use_preencoding:
-                # === INSTANT SDF FEATURE LOOKUP ===
-                sdf_load_start = time.time()
-                sdf_features_batch = batch['sdf_features'].to(device)  # Pre-encoded features
-                sdf_loading_time += time.time() - sdf_load_start
-                
-                # === FORWARD PASS (no SDF encoding needed) ===
-                forward_start = time.time()
-                if scaler is not None:
-                    try:
-                        with autocast('cuda'):  # New PyTorch API
-                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                            pred_quality = model(flattened_features)
-                            loss = criterion(pred_quality, score_batch)
-                    except TypeError:
-                        with autocast():  # Fallback to old API
-                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                            pred_quality = model(flattened_features)
-                            loss = criterion(pred_quality, score_batch)
-                else:
-                    flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                    pred_quality = model(flattened_features)
-                    loss = criterion(pred_quality, score_batch)
-                forward_pass_time += time.time() - forward_start
+            # === INSTANT SDF FEATURE LOOKUP ===
+            sdf_load_start = time.time()
+            sdf_features_batch = batch['sdf_features'].to(device)  # Pre-encoded features
+            sdf_loading_time += time.time() - sdf_load_start
+            
+            # === FORWARD PASS (no SDF encoding needed) ===
+            forward_start = time.time()
+            if scaler is not None:
+                try:
+                    with autocast('cuda'):  # New PyTorch API
+                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                        pred_quality = model(flattened_features)
+                        loss = criterion(pred_quality, score_batch)
+                except TypeError:
+                    with autocast():  # Fallback to old API
+                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                        pred_quality = model(flattened_features)
+                        loss = criterion(pred_quality, score_batch)
             else:
-                # === SDF LOADING ===
-                sdf_load_start = time.time()
-                scene_indices = batch['scene_idx'].to(device)
-                sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
-                sdf_loading_time += time.time() - sdf_load_start
-                
-                # === FORWARD PASS (including SDF encoding) ===
-                forward_start = time.time()
-                if scaler is not None:
-                    try:
-                        with autocast('cuda'):  # New PyTorch API
-                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                            loss = criterion(pred_quality, score_batch)
-                    except TypeError:
-                        with autocast():  # Fallback to old API
-                            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                            loss = criterion(pred_quality, score_batch)
-                else:
-                    pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                    loss = criterion(pred_quality, score_batch)
-                forward_pass_time += time.time() - forward_start
+                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                pred_quality = model(flattened_features)
+                loss = criterion(pred_quality, score_batch)
+            forward_pass_time += time.time() - forward_start
             
             # === BACKWARD PASS ===
             backward_start = time.time()
             
-            # Normalize loss for gradient accumulation
-            loss = loss / args.gradient_accumulation_steps
-            
             if scaler is not None:
                 scaler.scale(loss).backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
             else:
                 loss.backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
@@ -338,44 +276,25 @@ def main(args):
                 grasp_batch = batch['grasp'].to(device)
                 score_batch = batch['score'].to(device)
                 
-                if args.use_preencoding:
-                    # Use pre-encoded features
-                    sdf_features_batch = batch['sdf_features'].to(device)
-                    
-                    # Forward pass
-                    if scaler is not None:
-                        try:
-                            with autocast('cuda'):  # New PyTorch API
-                                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                                pred_quality = model(flattened_features)
-                                loss = criterion(pred_quality, score_batch)
-                        except TypeError:
-                            with autocast():  # Fallback to old API
-                                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                                pred_quality = model(flattened_features)
-                                loss = criterion(pred_quality, score_batch)
-                    else:
-                        flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                        pred_quality = model(flattened_features)
-                        loss = criterion(pred_quality, score_batch)
+                # Use pre-encoded features
+                sdf_features_batch = batch['sdf_features'].to(device)
+                
+                # Forward pass
+                if scaler is not None:
+                    try:
+                        with autocast('cuda'):  # New PyTorch API
+                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                            pred_quality = model(flattened_features)
+                            loss = criterion(pred_quality, score_batch)
+                    except TypeError:
+                        with autocast():  # Fallback to old API
+                            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                            pred_quality = model(flattened_features)
+                            loss = criterion(pred_quality, score_batch)
                 else:
-                    # Load SDFs
-                    scene_indices = batch['scene_idx'].to(device)
-                    sdf_batch = dataset.batch_get_sdf(scene_indices).to(device)
-                    
-                    # Forward pass
-                    if scaler is not None:
-                        try:
-                            with autocast('cuda'):  # New PyTorch API
-                                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                                loss = criterion(pred_quality, score_batch)
-                        except TypeError:
-                            with autocast():  # Fallback to old API
-                                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                                loss = criterion(pred_quality, score_batch)
-                    else:
-                        pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
-                        loss = criterion(pred_quality, score_batch)
+                    flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
+                    pred_quality = model(flattened_features)
+                    loss = criterion(pred_quality, score_batch)
 
                 batch_size = grasp_batch.size(0)
                 total_val_loss += loss.item() * batch_size
