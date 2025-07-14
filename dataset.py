@@ -414,25 +414,20 @@ class CachedGraspDataset(Dataset):
     
     def load_scene_data(self, scene_idx):
         """Public method for training script to load raw data."""
-        try:
-            with np.load(self.data_files[scene_idx]) as scene_data:
-                sdf = torch.from_numpy(scene_data["sdf"]).float()
-                grasps = torch.from_numpy(scene_data["grasps"]).float()
-                scores = torch.from_numpy(scene_data["scores"]).float()
-                return sdf, grasps, scores
-        except (zipfile.BadZipFile, OSError, ValueError) as e:
-            # Find a valid replacement
-            for fallback_idx in range(len(self.data_files)):
-                if fallback_idx != scene_idx:
-                    try:
-                        with np.load(self.data_files[fallback_idx]) as fallback_data:
-                            sdf = torch.from_numpy(fallback_data["sdf"]).float()
-                            grasps = torch.from_numpy(fallback_data["grasps"]).float()
-                            scores = torch.from_numpy(fallback_data["scores"]).float()
-                            return sdf, grasps, scores
-                    except (zipfile.BadZipFile, OSError, ValueError):
-                        continue
-            raise RuntimeError(f"Could not find any valid scene data files")
+        with np.load(self.data_files[scene_idx]) as scene_data:
+            sdf = torch.from_numpy(scene_data["sdf"]).float()
+            grasps = torch.from_numpy(scene_data["grasps"]).float()
+            scores = torch.from_numpy(scene_data["scores"]).float()
+            
+            # Pad to exactly 480 grasp-score pairs if needed
+            num_grasps = grasps.shape[0]
+            if num_grasps < 480:
+                pad_size = 480 - num_grasps
+                indices_to_duplicate = torch.randint(0, num_grasps, (pad_size,))
+                grasps = torch.cat([grasps, grasps[indices_to_duplicate]], dim=0)
+                scores = torch.cat([scores, scores[indices_to_duplicate]], dim=0)
+            
+            return sdf, grasps, scores
 
     def __len__(self):
         return len(self.grasp_locations)
