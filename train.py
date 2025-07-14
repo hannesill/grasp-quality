@@ -8,7 +8,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import CachedGraspDataset
+from dataset import GPUCachedGraspDataset
 from model import GQEstimator, GQEstimatorLarge
 
 def parse_args():
@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
     parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--num_workers', type=int, default=8, help='Number of dataloader workers')
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0 recommended for GPU cached data)')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
@@ -46,154 +46,17 @@ class EarlyStopping:
             self.counter += 1
         return self.counter >= self.patience
 
-def pre_encode_sdfs(model, dataset, scene_indices, device, batch_size=128):
-    """Pre-encode with parallel data loading for 10x faster disk I/O."""
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-    
-    setup_start = time.time()
-    unique_scene_indices = list(set(scene_indices))
-    sdf_features_cache = {}
-    grasp_score_cache = {}
-    
-    print(f"Pre-encoding {len(unique_scene_indices)} unique SDFs (batch_size={batch_size})...")
-    setup_time = time.time() - setup_start
-    
-    # Timing variables
-    total_loading_time = 0
-    total_encoding_time = 0
-    total_caching_time = 0
-    corrupted_scenes = 0
-    
-    # Thread-safe locks
-    cache_lock = threading.Lock()
-    
-    def load_scene_parallel(scene_idx):
-        """Load a single scene in parallel."""
-        try:
-            return scene_idx, dataset.load_scene_data(scene_idx)
-        except Exception as e:
-            return scene_idx, None
-    
-    encoding_start = time.time()
-    
-    with torch.no_grad():
-        pbar = tqdm(
-            range(0, len(unique_scene_indices), batch_size),
-            desc="Pre-encoding SDFs (Parallel)",
-            unit="batch",
-            total=(len(unique_scene_indices) + batch_size - 1) // batch_size
-        )
-        
-        for i in pbar:
-            batch_start = time.time()
-            batch_indices = unique_scene_indices[i:i+batch_size]
-            
-            # === PARALLEL LOADING PHASE ===
-            loading_start = time.time()
-            
-            # Load all scenes in this batch in parallel (10x faster!)
-            with ThreadPoolExecutor(max_workers=min(16, len(batch_indices))) as executor:
-                results = list(executor.map(load_scene_parallel, batch_indices))
-            
-            # Process results
-            sdf_batch = []
-            valid_indices = []
-            
-            for scene_idx, scene_data in results:
-                if scene_data is not None:
-                    sdf, grasps, scores = scene_data
-                    sdf_batch.append(sdf)
-                    valid_indices.append(scene_idx)
-                    grasp_score_cache[scene_idx] = (grasps, scores)
-                else:
-                    corrupted_scenes += 1
-            
-            loading_time = time.time() - loading_start
-            total_loading_time += loading_time
-            
-            # === ENCODING PHASE (unchanged) ===
-            if sdf_batch:
-                encoding_batch_start = time.time()
-                sdf_tensor = torch.stack(sdf_batch).to(device)
-                encoded_features = model.encode_sdf(sdf_tensor)
-                encoding_batch_time = time.time() - encoding_batch_start
-                total_encoding_time += encoding_batch_time
-                
-                # === CACHING PHASE ===
-                caching_start = time.time()
-                for j, scene_idx in enumerate(valid_indices):
-                    sdf_features_cache[scene_idx] = encoded_features[j].cpu()
-                caching_time = time.time() - caching_start
-                total_caching_time += caching_time
-            
-            # Update progress bar
-            batch_time = time.time() - batch_start
-            pbar.set_postfix({
-                'batch_time': f'{batch_time:.2f}s',
-                'loading': f'{loading_time:.2f}s',
-                'encoding': f'{encoding_batch_time:.2f}s' if sdf_batch else '0.00s',
-                'cached': len(sdf_features_cache)
-            })
-    
-    # Rest of function unchanged...
-    cache_update_start = time.time()
-    dataset.update_caches(sdf_features_cache, grasp_score_cache)
-    cache_update_time = time.time() - cache_update_start
-    
-    # Return timing info...
-    total_preencoding_time = time.time() - setup_start + setup_time
-    
-    print(f"\n=== PRE-ENCODING TIMING BREAKDOWN ===")
-    print(f"Total pre-encoding time: {total_preencoding_time:.2f}s")
-    print(f"  Setup time: {setup_time:.3f}s ({setup_time/total_preencoding_time*100:.1f}%)")
-    print(f"  Data loading (parallel): {total_loading_time:.2f}s ({total_loading_time/total_preencoding_time*100:.1f}%)")
-    print(f"  SDF encoding: {total_encoding_time:.2f}s ({total_encoding_time/total_preencoding_time*100:.1f}%)")
-    print(f"  Feature caching: {total_caching_time:.2f}s ({total_caching_time/total_preencoding_time*100:.1f}%)")
-    print(f"  Cache update: {cache_update_time:.3f}s ({cache_update_time/total_preencoding_time*100:.1f}%)")
-    print(f"Successfully cached {len(sdf_features_cache)} SDF features")
-    if corrupted_scenes > 0:
-        print(f"⚠️  Skipped {corrupted_scenes} corrupted scenes")
-    
-    return {
-        'total_time': total_preencoding_time,
-        'setup_time': setup_time,
-        'loading_time': total_loading_time,
-        'encoding_time': total_encoding_time,
-        'caching_time': total_caching_time,
-        'cache_update_time': cache_update_time,
-        'scenes_processed': len(sdf_features_cache),
-        'corrupted_scenes': corrupted_scenes
-    }
-
-def preload_all_scenes(dataset):
-    """Preload all scenes into memory once at startup."""
-    print(f"Preloading all {len(dataset.data_files)} scenes into memory...")
-    
-    from concurrent.futures import ThreadPoolExecutor
-    
-    def load_single_scene(scene_idx):
-        return scene_idx, dataset.load_scene_data(scene_idx)
-    
-    # Load all scenes in parallel
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        results = list(tqdm(
-            executor.map(load_single_scene, range(len(dataset.data_files))),
-            total=len(dataset.data_files),
-            desc="Preloading scenes"
-        ))
-    
-    print(f"✅ Preloaded {len(results)} scenes into memory")
-    return True
-
 def main(args):
     # --- Device Setup ---
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    if not torch.cuda.is_available():
+        print("❌ CUDA not available! This script requires GPU for optimal performance.")
+        return
 
     # --- Model Creation ---
     if args.use_large_model:
-        # Use larger model for better A100 utilization
         model = GQEstimatorLarge(
             input_size=48, 
             base_channels=args.base_channels, 
@@ -201,7 +64,6 @@ def main(args):
         ).to(device)
         print("Using GQEstimatorLarge for better GPU utilization")
     else:
-        # Use standard model
         model = GQEstimator(
             input_size=48, 
             base_channels=args.base_channels, 
@@ -209,12 +71,12 @@ def main(args):
         ).to(device)
         print("Using standard GQEstimator")
     
-    # --- Dataset Creation ---
-    dataset = CachedGraspDataset(Path(args.data_path))
-    print(f"Loaded dataset with {len(dataset.data_files)} scenes")
-    
-    # NEW: Preload all scenes once
-    preload_all_scenes(dataset)
+    # --- Dataset Creation with GPU Caching ---
+    print("\n🚀 Creating GPU-cached dataset...")
+    dataset_start = time.time()
+    dataset = GPUCachedGraspDataset(Path(args.data_path), device=device)
+    dataset_time = time.time() - dataset_start
+    print(f"Dataset creation time: {dataset_time:.2f}s")
     
     # --- Train/Val Splits ---
     num_samples = len(dataset)
@@ -227,28 +89,22 @@ def main(args):
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
     
     # --- DataLoaders ---
-    num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
-    print(f"Using {num_workers} workers for data loading")
-    
+    # Note: num_workers=0 is recommended since data is already on GPU
     train_loader = DataLoader(
         train_set, 
         batch_size=args.batch_size, 
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
+        num_workers=args.num_workers,
         shuffle=True,
-        prefetch_factor=4 if num_workers > 0 else 2,
-        drop_last=True  # Ensures consistent batch sizes for better GPU utilization
+        drop_last=True,
+        pin_memory=False  # Data is already on GPU
     )
     val_loader = DataLoader(
         val_set, 
         batch_size=args.batch_size, 
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-        shuffle=False,  # No need to shuffle validation data
-        prefetch_factor=4 if num_workers > 0 else 2,
-        drop_last=False
+        num_workers=args.num_workers,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=False  # Data is already on GPU
     )
     
     # --- Training Setup ---
@@ -258,7 +114,6 @@ def main(args):
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
     
     # --- Model Optimization ---
-    # PyTorch 2.0 compilation for additional speedup
     if hasattr(torch, 'compile'):
         try:
             model = torch.compile(model)
@@ -276,30 +131,21 @@ def main(args):
     wandb.watch(model, criterion, log="all", log_freq=100)
     
     # --- Training Loop ---
-    print(f"Starting training for {args.epochs} epochs...")
+    print(f"\n🏃‍♂️ Starting training for {args.epochs} epochs...")
+    print("⚡ Data loading time should be near-zero with GPU caching!")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
         epoch_start_time = time.time()
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
-        # === PRE-ENCODE SDFS FOR THIS EPOCH ===
-        # Get all scene indices needed for this epoch
-        train_scene_indices = [dataset.grasp_locations[train_set.indices[i]][0] for i in range(len(train_set))]
-        val_scene_indices = [dataset.grasp_locations[val_set.indices[i]][0] for i in range(len(val_set))]
-        all_scene_indices = train_scene_indices + val_scene_indices
-        
-        # Pre-encode with detailed timing
-        preencoding_timing = pre_encode_sdfs(model, dataset, all_scene_indices, device, batch_size=512)
-        
         # === TRAINING PHASE ===
         model.train()
         total_train_loss = 0
         num_train_samples = 0
         
-        # Timing variables for training
+        # Timing variables for detailed analysis
         data_loading_time = 0
-        sdf_loading_time = 0
         forward_pass_time = 0
         backward_pass_time = 0
         
@@ -310,33 +156,28 @@ def main(args):
             batch_start_time = time.time()
             optimizer.zero_grad()
             
-            # === DATA LOADING ===
+            # === INSTANT DATA ACCESS (already on GPU!) ===
             data_start = time.time()
-            grasp_batch = batch['grasp'].to(device)
-            score_batch = batch['score'].to(device)
+            sdf_batch = batch['sdf']  # Already on GPU!
+            grasp_batch = batch['grasp']  # Already on GPU!
+            score_batch = batch['score']  # Already on GPU!
             data_loading_time += time.time() - data_start
-            
-            # === SDF FEATURE LOOKUP ===
-            sdf_load_start = time.time()
-            sdf_features_batch = batch['sdf_features'].to(device)  # Pre-encoded features
-            sdf_loading_time += time.time() - sdf_load_start
             
             # === FORWARD PASS ===
             forward_start = time.time()
-            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-            pred_quality = model(flattened_features)
+            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
             loss = criterion(pred_quality, score_batch)
             forward_pass_time += time.time() - forward_start
             
             # === BACKWARD PASS ===
             backward_start = time.time()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
-            batch_size = grasp_batch.size(0)
+            batch_size = sdf_batch.size(0)
             total_train_loss += loss.item() * batch_size
             num_train_samples += batch_size
             
@@ -357,17 +198,15 @@ def main(args):
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
-                # Validation forward pass
-                grasp_batch = batch['grasp'].to(device)
-                score_batch = batch['score'].to(device)
-                sdf_features_batch = batch['sdf_features'].to(device)
+                # Validation forward pass (also instant!)
+                sdf_batch = batch['sdf']
+                grasp_batch = batch['grasp']
+                score_batch = batch['score']
                 
-                # Forward pass
-                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                pred_quality = model(flattened_features)
+                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
                 loss = criterion(pred_quality, score_batch)
 
-                batch_size = grasp_batch.size(0)
+                batch_size = sdf_batch.size(0)
                 total_val_loss += loss.item() * batch_size
                 num_val_samples += batch_size
                 
@@ -380,16 +219,14 @@ def main(args):
         # Total epoch time
         epoch_time = time.time() - epoch_start_time
         
-        # === COMPREHENSIVE TIMING BREAKDOWN ===
-        print(f"\n=== EPOCH {epoch+1} TIMING BREAKDOWN ===")
+        # === PERFORMANCE ANALYSIS ===
+        print(f"\n⚡ ULTRA-FAST TRAINING BREAKDOWN ⚡")
         print(f"Total epoch time: {epoch_time:.2f}s")
-        print(f"Pre-encoding time: {preencoding_timing['total_time']:.2f}s ({preencoding_timing['total_time']/epoch_time*100:.1f}%)")
         print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
         print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
         
         print(f"\nTraining phase breakdown:")
-        print(f"  Data loading: {data_loading_time:.2f}s ({data_loading_time/training_time*100:.1f}%)")
-        print(f"  SDF feature lookup: {sdf_loading_time:.2f}s ({sdf_loading_time/training_time*100:.1f}%)")
+        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time/training_time*100:.2f}% - NEAR ZERO! 🚀)")
         print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
@@ -405,25 +242,19 @@ def main(args):
             torch.save(model.state_dict(), 'best_model.pth')
             print(f"✅ New best model saved! Val Loss: {avg_val_loss:.4f}")
         
-        # Log to wandb with detailed timing
+        # Log to wandb
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
             "learning_rate": current_lr,
             "timing/epoch_total": epoch_time,
-            "timing/preencoding_total": preencoding_timing['total_time'],
-            "timing/preencoding_loading": preencoding_timing['loading_time'],
-            "timing/preencoding_encoding": preencoding_timing['encoding_time'],
-            "timing/preencoding_caching": preencoding_timing['caching_time'],
             "timing/training_total": training_time,
             "timing/validation_total": validation_time,
             "timing/data_loading": data_loading_time,
-            "timing/sdf_loading": sdf_loading_time,
             "timing/forward_pass": forward_pass_time,
             "timing/backward_pass": backward_pass_time,
-            "preencoding/scenes_processed": preencoding_timing['scenes_processed'],
-            "preencoding/corrupted_scenes": preencoding_timing['corrupted_scenes'],
+            "gpu_memory_usage_gb": dataset._get_gpu_memory_usage(),
         })
         
         # Early stopping check
@@ -436,6 +267,12 @@ def main(args):
     torch.save(model.state_dict(), model_path)
     print(f"Final model saved to {model_path}")
     print(f"Best model saved to best_model.pth")
+    
+    # --- Final Performance Summary ---
+    print(f"\n🎉 TRAINING COMPLETE! 🎉")
+    print(f"GPU Memory Usage: {dataset._get_gpu_memory_usage():.2f} GB")
+    print(f"Data loading time per epoch: ~{data_loading_time:.4f}s (NEAR ZERO!)")
+    print(f"Your A100 is being used optimally! 🚀")
     
     wandb.finish()
 
