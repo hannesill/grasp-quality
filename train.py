@@ -94,7 +94,14 @@ def main(args):
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
 
     # Create optimized DataLoaders for GPU training
-    num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
+    if args.use_preencoding:
+        # Use fewer workers for pre-encoding to avoid CUDA multiprocessing issues
+        # Data loading is not the bottleneck anymore due to pre-encoding
+        num_workers = min(4, args.num_workers) if args.num_workers > 0 else 0
+        print(f"Using {num_workers} workers for pre-encoding mode (reduced to avoid CUDA multiprocessing issues)")
+    else:
+        num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
+        
     train_loader = DataLoader(
         train_set, 
         batch_size=args.batch_size, 

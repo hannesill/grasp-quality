@@ -20,7 +20,7 @@ def run_ultra_fast_training():
         sys.executable, 'train.py',
         '--use_preencoding',          # KEY: Enable pre-encoding optimization
         '--batch_size', '512',        # Large batch for maximum GPU utilization
-        '--num_workers', '12',        # Use all available CPU cores
+        '--num_workers', '4',         # Reduced for CUDA multiprocessing compatibility
         '--mixed_precision',          # Enable mixed precision for A100
         '--lr', '2e-4',              # Optimized learning rate
         '--epochs', '100',
@@ -42,7 +42,7 @@ def run_ultra_fast_training():
     print("✅ Batch encoding: Maximum GPU utilization during pre-encoding")
     print("✅ Mixed precision: FP16 for A100 Tensor Cores")
     print("✅ Large batch size: 512 for maximum throughput")
-    print("✅ Optimized DataLoader: 12 workers for parallel data loading")
+    print("✅ Optimized DataLoader: 4 workers (reduced for CUDA multiprocessing)")
     print()
     print("Expected performance:")
     print("📈 SDF loading: 20s → 0.1s (200x faster)")

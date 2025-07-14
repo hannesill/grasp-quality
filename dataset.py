@@ -317,9 +317,9 @@ class PreEncodedGraspDataset(Dataset):
                     # Batch encode on GPU
                     encoded_features = self.model.encode_sdf(sdf_tensor)
                     
-                    # Store in cache
+                    # Store in cache on CPU (for multiprocessing compatibility)
                     for j, scene_idx in enumerate(valid_indices):
-                        self.sdf_features_cache[scene_idx] = encoded_features[j]
+                        self.sdf_features_cache[scene_idx] = encoded_features[j].cpu()
                 
                 # Progress update
                 if (i // batch_size) % 10 == 0:
