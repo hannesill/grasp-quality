@@ -13,7 +13,7 @@ import wandb
 import numpy as np
 
 from dataset import OptimizedGraspDataset, PreEncodedGraspDataset
-from model import GQEstimator
+from model import GQEstimator, GQEstimatorLarge
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training for faster training on modern GPUs')
     parser.add_argument('--use_preencoding', action='store_true', help='Use pre-encoding strategy for 100x faster training (eliminates SDF loading bottleneck)')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Number of gradient accumulation steps for effective larger batch sizes')
+    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization (more parameters)')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -65,7 +66,20 @@ def main(args):
     print(f"Using device: {device}")
 
     # --- Model Creation (needed for PreEncodedGraspDataset) ---
-    model = GQEstimator(input_size=48, base_channels=args.base_channels, fc_dims=args.fc_dims).to(device)
+    if args.use_large_model:
+        # Use larger model for better A100 utilization
+        model = GQEstimatorLarge(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            fc_dims=args.fc_dims
+        ).to(device)
+    else:
+        # Use standard model
+        model = GQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            fc_dims=args.fc_dims
+        ).to(device)
     
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
@@ -95,13 +109,13 @@ def main(args):
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
 
     # Create optimized DataLoaders for GPU training
+    # Use full parallelism - pre-encoded features are stored on CPU so multiprocessing is safe
+    num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
+    
     if args.use_preencoding:
-        # Use fewer workers for pre-encoding to avoid CUDA multiprocessing issues
-        # Data loading is not the bottleneck anymore due to pre-encoding
-        num_workers = min(4, args.num_workers) if args.num_workers > 0 else 0
-        print(f"Using {num_workers} workers for pre-encoding mode (reduced to avoid CUDA multiprocessing issues)")
+        print(f"Using {num_workers} workers for pre-encoding mode (features cached on CPU for safe multiprocessing)")
     else:
-        num_workers = args.num_workers if args.num_workers > 0 else min(8, torch.get_num_threads())
+        print(f"Using {num_workers} workers for standard mode")
         
     # Configure DataLoader parameters based on num_workers
     if num_workers > 0:
