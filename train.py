@@ -166,6 +166,26 @@ def pre_encode_sdfs(model, dataset, scene_indices, device, batch_size=128):
         'corrupted_scenes': corrupted_scenes
     }
 
+def preload_all_scenes(dataset):
+    """Preload all scenes into memory once at startup."""
+    print(f"Preloading all {len(dataset.data_files)} scenes into memory...")
+    
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def load_single_scene(scene_idx):
+        return scene_idx, dataset.load_scene_data(scene_idx)
+    
+    # Load all scenes in parallel
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(tqdm(
+            executor.map(load_single_scene, range(len(dataset.data_files))),
+            total=len(dataset.data_files),
+            desc="Preloading scenes"
+        ))
+    
+    print(f"✅ Preloaded {len(results)} scenes into memory")
+    return True
+
 def main(args):
     # --- Device Setup ---
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -192,6 +212,9 @@ def main(args):
     # --- Dataset Creation ---
     dataset = CachedGraspDataset(Path(args.data_path))
     print(f"Loaded dataset with {len(dataset.data_files)} scenes")
+    
+    # NEW: Preload all scenes once
+    preload_all_scenes(dataset)
     
     # --- Train/Val Splits ---
     num_samples = len(dataset)
@@ -267,7 +290,7 @@ def main(args):
         all_scene_indices = train_scene_indices + val_scene_indices
         
         # Pre-encode with detailed timing
-        preencoding_timing = pre_encode_sdfs(model, dataset, all_scene_indices, device)
+        preencoding_timing = pre_encode_sdfs(model, dataset, all_scene_indices, device, batch_size=512)
         
         # === TRAINING PHASE ===
         model.train()
