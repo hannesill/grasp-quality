@@ -108,9 +108,9 @@ def main(args):
     )
     
     # --- Training Setup ---
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = torch.nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.05, total_iters=args.epochs)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
     
     # --- Model Optimization ---
@@ -230,7 +230,7 @@ def main(args):
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
         # Step the scheduler
-        scheduler.step()
+        scheduler.step(avg_val_loss)
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f'\nEpoch [{epoch+1}/{args.epochs}], LR: {current_lr:.2e}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')

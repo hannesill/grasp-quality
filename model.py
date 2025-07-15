@@ -1,6 +1,20 @@
 import torch
 import torch.nn as nn
 
+class SpatialAttention(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Conv3d(channels, channels//4, 1),
+            nn.ReLU(),
+            nn.Conv3d(channels//4, 1, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        attention_weights = self.attention(x)  # (B, 1, 6, 6, 6)
+        return x * attention_weights  # Element-wise multiplication
+
 class GQEstimator(nn.Module):
     def __init__(self, input_size=48, base_channels=8, fc_dims=[256, 128, 64]):
         super(GQEstimator, self).__init__()
@@ -28,6 +42,9 @@ class GQEstimator(nn.Module):
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2), # 32x6x6x6
         )
+
+        # Add spatial attention
+        self.spatial_attention = SpatialAttention(base_channels*4)
 
         # Calculate flattened size
         flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
@@ -71,6 +88,9 @@ class GQEstimator(nn.Module):
 
         # Get features (B, channel_dim, D, D, D)
         features = self.conv_block(sdf)
+        
+        # Apply spatial attention
+        features = self.spatial_attention(features)
 
         # Flatten (B, channel_dim, D, D, D) -> (B, flattened_size)
         batch_size = features.shape[0]
