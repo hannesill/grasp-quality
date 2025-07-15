@@ -230,7 +230,7 @@ def main(args):
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
         # Step the scheduler
-        scheduler.step(avg_val_loss)
+        scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f'\nEpoch [{epoch+1}/{args.epochs}], LR: {current_lr:.2e}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
