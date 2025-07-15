@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class GQEstimator(nn.Module):
-    def __init__(self, input_size=48, base_channels=16, fc_dims=[256, 128, 64]):
+    def __init__(self, input_size=48, base_channels=8, fc_dims=[256, 128, 64]):
         super(GQEstimator, self).__init__()
 
         print("Initializing GQEstimator")
@@ -11,26 +11,26 @@ class GQEstimator(nn.Module):
         # Input is {input_size}x{input_size}x{input_size}
         
         # Calculate output size after convolutions
-        conv_output_size = input_size // 16  # After 4 max pooling layers with stride 2
+        conv_output_size = input_size // 8  # After 3 max pooling layers with stride 2
 
         # 3D Convolutional Neural Network
         self.conv_block = nn.Sequential(
-            nn.Conv3d(1, base_channels, kernel_size=3, padding=1), # 16x48x48x48
+            nn.Conv3d(1, base_channels, kernel_size=3, padding=1), # 8x48x48x48
+            nn.BatchNorm3d(base_channels),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2),
-            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
+            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 16x24x24x24
+            nn.BatchNorm3d(base_channels*2),
             nn.ReLU(), 
             nn.MaxPool3d(kernel_size=2, stride=2),
-            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
+            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 32x12x12x12
+            nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
-            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1), # 128x6x6x6
-            nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2) # 128x3x3x3
+            nn.MaxPool3d(kernel_size=2, stride=2), # 32x6x6x6
         )
 
         # Calculate flattened size
-        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*8)
+        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
 
         print(f"Flattened size: {flattened_size}")
 
@@ -41,7 +41,9 @@ class GQEstimator(nn.Module):
         for dim in fc_dims:
             layers.extend([
                 nn.Linear(prev_dim, dim),
-                nn.ReLU()
+                nn.BatchNorm1d(dim),
+                nn.ReLU(),
+                nn.Dropout(0.1)
             ])
             prev_dim = dim
             
@@ -119,7 +121,7 @@ class GQEstimatorLarge(nn.Module):
     - More parameters to stress GPU
     - Optimized for A100 throughput
     """
-    def __init__(self, input_size=48, base_channels=32, fc_dims=[512, 256, 128]):
+    def __init__(self, input_size=48, base_channels=16, fc_dims=[512, 256, 128]):
         super(GQEstimatorLarge, self).__init__()
 
         print("Initializing GQEstimatorLarge (A100 Optimized)")
@@ -128,49 +130,40 @@ class GQEstimatorLarge(nn.Module):
         # Input is {input_size}x{input_size}x{input_size}
         
         # Calculate output size after convolutions
-        conv_output_size = input_size // 16  # After 4 max pooling layers with stride 2
+        conv_output_size = input_size // 8  # After 3 max pooling layers with stride 2
 
         # Larger 3D Convolutional Neural Network for better GPU utilization
         self.conv_block = nn.Sequential(
             # First block - more channels
-            nn.Conv3d(1, base_channels, kernel_size=3, padding=1),
+            nn.Conv3d(1, base_channels, kernel_size=3, padding=1), # 16x48x48x48
             nn.BatchNorm3d(base_channels),
             nn.ReLU(),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1), # 16x48x48x48
             nn.BatchNorm3d(base_channels),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.MaxPool3d(kernel_size=2, stride=2), # 16x24x24x24
             
             # Second block
-            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
             nn.BatchNorm3d(base_channels*2),
             nn.ReLU(),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
             nn.BatchNorm3d(base_channels*2),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.MaxPool3d(kernel_size=2, stride=2), # 32x12x12x12
             
             # Third block
-            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
             nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
             nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
-            
-            # Fourth block - even larger
-            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
-            nn.BatchNorm3d(base_channels*8),
-            nn.ReLU(),
-            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
-            nn.BatchNorm3d(base_channels*8),
-            nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2)
+            nn.MaxPool3d(kernel_size=2, stride=2) # 64x6x6x6
         )
 
         # Calculate flattened size
-        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*8)
+        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
 
         print(f"Flattened size: {flattened_size}")
 
