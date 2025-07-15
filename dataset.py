@@ -602,3 +602,210 @@ class GPUCachedGraspDataset(Dataset):
         for idx in range(len(self)):
             yield self[idx]
                 
+
+class ThreeChannelGPUDataset(Dataset):
+    """
+    GPU-cached dataset for preprocessed 3-channel inputs.
+    
+    Loads all preprocessed 3-channel data (SDF + palm distance + fingertip distance) 
+    to GPU memory for ultra-fast training.
+    """
+    
+    def __init__(self, preprocessed_path, device='cuda'):
+        super().__init__()
+        self.preprocessed_path = Path(preprocessed_path)
+        self.device = device
+        
+        # Load all preprocessed data to GPU
+        self.gpu_inputs = None
+        self.gpu_scores = None
+        self._load_all_to_gpu()
+        
+        print(f"✅ 3-channel dataset loaded to {device}!")
+        print(f"📊 Total samples: {len(self)}")
+        print(f"📐 Input shape: {self.gpu_inputs.shape}")
+        print(f"💾 GPU memory usage: {self._get_gpu_memory_usage():.2f} GB")
+    
+    def _load_all_to_gpu(self):
+        """Load all preprocessed 3-channel data to GPU memory."""
+        # Find all preprocessed files
+        preprocessed_files = list(self.preprocessed_path.glob("*_3channel.npz"))
+        
+        if not preprocessed_files:
+            raise FileNotFoundError(f"No preprocessed files found in {self.preprocessed_path}")
+        
+        print(f"📁 Found {len(preprocessed_files)} preprocessed files")
+        print(f"🔥 Loading all data to {self.device}...")
+        
+        # Load all data
+        all_inputs = []
+        all_scores = []
+        
+        for file in tqdm(preprocessed_files, desc="Loading preprocessed data"):
+            try:
+                with np.load(file) as data:
+                    inputs = data['inputs']  # (N, 3, 48, 48, 48)
+                    scores = data['scores']  # (N,)
+                    
+                    all_inputs.append(inputs)
+                    all_scores.append(scores)
+            except Exception as e:
+                print(f"⚠️  Error loading {file}: {e}")
+                continue
+        
+        if not all_inputs:
+            raise RuntimeError("No valid preprocessed data found!")
+        
+        # Stack all data
+        all_inputs = np.concatenate(all_inputs, axis=0)
+        all_scores = np.concatenate(all_scores, axis=0)
+        
+        print(f"📊 Total dataset size: {len(all_inputs)} samples")
+        print(f"📐 Input shape: {all_inputs.shape}")
+        print(f"💾 Memory usage: {all_inputs.nbytes / (1024**3):.2f} GB")
+        
+        # Convert to tensors and move to device
+        if self.device == 'cuda' and torch.cuda.is_available():
+            self.gpu_inputs = torch.from_numpy(all_inputs).float().to(self.device)
+            self.gpu_scores = torch.from_numpy(all_scores).float().to(self.device)
+            print(f"🚀 Data loaded to GPU successfully!")
+        else:
+            print("⚠️  CUDA not available, keeping data on CPU")
+            self.gpu_inputs = torch.from_numpy(all_inputs).float()
+            self.gpu_scores = torch.from_numpy(all_scores).float()
+    
+    def _get_gpu_memory_usage(self):
+        """Calculate GPU memory usage in GB."""
+        total_bytes = 0
+        if self.gpu_inputs is not None:
+            total_bytes += self.gpu_inputs.numel() * self.gpu_inputs.element_size()
+        if self.gpu_scores is not None:
+            total_bytes += self.gpu_scores.numel() * self.gpu_scores.element_size()
+        return total_bytes / (1024 ** 3)
+    
+    def __len__(self):
+        return len(self.gpu_inputs) if self.gpu_inputs is not None else 0
+    
+    def __getitem__(self, idx):
+        """
+        Get a single sample.
+        
+        Returns:
+            dict with keys:
+                - 'input': (3, 48, 48, 48) tensor - 3-channel input
+                - 'score': float - grasp quality score
+        """
+        return {
+            'input': self.gpu_inputs[idx],  # (3, 48, 48, 48)
+            'score': self.gpu_scores[idx],  # scalar
+        }
+    
+    def get_batch(self, indices):
+        """
+        Get a batch of samples efficiently.
+        
+        Args:
+            indices: List or tensor of sample indices
+            
+        Returns:
+            dict with keys:
+                - 'input': (batch_size, 3, 48, 48, 48) tensor
+                - 'score': (batch_size,) tensor
+        """
+        if isinstance(indices, (list, tuple)):
+            indices = torch.tensor(indices, device=self.device)
+        elif isinstance(indices, torch.Tensor):
+            indices = indices.to(self.device)
+        
+        return {
+            'input': self.gpu_inputs[indices],
+            'score': self.gpu_scores[indices],
+        }
+
+
+class ThreeChannelPreprocessedDataset(Dataset):
+    """
+    Lightweight dataset for preprocessed 3-channel data.
+    
+    Loads preprocessed files on-demand with caching for efficient training.
+    Good for when you can't fit all data in GPU memory.
+    """
+    
+    def __init__(self, preprocessed_path, cache_size=100):
+        super().__init__()
+        self.preprocessed_path = Path(preprocessed_path)
+        self.cache_size = cache_size
+        
+        # Find all preprocessed files
+        self.preprocessed_files = list(self.preprocessed_path.glob("*_3channel.npz"))
+        
+        if not self.preprocessed_files:
+            raise FileNotFoundError(f"No preprocessed files found in {self.preprocessed_path}")
+        
+        # Build index: (file_idx, sample_idx) for each sample
+        self.sample_index = []
+        self.file_sample_counts = []
+        
+        print("📁 Indexing preprocessed files...")
+        for file_idx, file in enumerate(tqdm(self.preprocessed_files, desc="Indexing")):
+            try:
+                with np.load(file) as data:
+                    num_samples = data['inputs'].shape[0]
+                    for sample_idx in range(num_samples):
+                        self.sample_index.append((file_idx, sample_idx))
+                    self.file_sample_counts.append(num_samples)
+            except Exception as e:
+                print(f"⚠️  Error indexing {file}: {e}")
+                self.file_sample_counts.append(0)
+        
+        # File cache
+        self.file_cache = {}
+        self.cache_order = []
+        
+        print(f"✅ Dataset indexed: {len(self.sample_index)} samples from {len(self.preprocessed_files)} files")
+    
+    def _load_file(self, file_idx):
+        """Load a preprocessed file with caching."""
+        if file_idx in self.file_cache:
+            return self.file_cache[file_idx]
+        
+        # Load file
+        file_path = self.preprocessed_files[file_idx]
+        try:
+            with np.load(file_path) as data:
+                inputs = torch.from_numpy(data['inputs']).float()  # (N, 3, 48, 48, 48)
+                scores = torch.from_numpy(data['scores']).float()  # (N,)
+                
+                file_data = {'inputs': inputs, 'scores': scores}
+        except Exception as e:
+            print(f"⚠️  Error loading {file_path}: {e}")
+            # Return dummy data
+            file_data = {
+                'inputs': torch.zeros(1, 3, 48, 48, 48),
+                'scores': torch.zeros(1)
+            }
+        
+        # Cache management
+        if len(self.file_cache) >= self.cache_size:
+            # Remove oldest file from cache
+            oldest_file = self.cache_order.pop(0)
+            del self.file_cache[oldest_file]
+        
+        self.file_cache[file_idx] = file_data
+        self.cache_order.append(file_idx)
+        
+        return file_data
+    
+    def __len__(self):
+        return len(self.sample_index)
+    
+    def __getitem__(self, idx):
+        """Get a single sample."""
+        file_idx, sample_idx = self.sample_index[idx]
+        file_data = self._load_file(file_idx)
+        
+        return {
+            'input': file_data['inputs'][sample_idx],  # (3, 48, 48, 48)
+            'score': file_data['scores'][sample_idx],  # scalar
+        }
+                

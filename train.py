@@ -8,26 +8,31 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import GPUCachedGraspDataset
-from model import GQEstimator, GQEstimatorLarge
+from dataset import ThreeChannelGPUDataset, ThreeChannelPreprocessedDataset
+from model import GQEstimator, get_model_info
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser = argparse.ArgumentParser(description="Train Optimized 3-Channel Grasp Quality Estimator")
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--train_size', type=int, default=5000, help='Number of training samples')
-    parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
-    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0 recommended for GPU cached data)')
-    parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
+    parser.add_argument('--train_size', type=int, default=100000, help='Number of training samples')
+    parser.add_argument('--val_size', type=int, default=10000, help='Number of validation samples')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers')
+    parser.add_argument('--preprocessed_path', type=str, default='data/preprocessed_3channel', 
+                       help='Path to preprocessed 3-channel data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
-    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization')
+    parser.add_argument('--use_gpu_cache', action='store_true', help='Load all data to GPU memory')
+    parser.add_argument('--cache_size', type=int, default=100, help='File cache size for on-demand loading')
+    
+    # Model architecture arguments (with optimized defaults)
+    parser.add_argument('--base_channels', type=int, default=16, help='Base channels for the CNN')
+    parser.add_argument('--fc_dims', nargs='+', type=int, default=[512, 256, 128], 
+                       help='Dimensions of FC layers')
+    
     return parser.parse_args()
 
 class EarlyStopping:
@@ -56,25 +61,33 @@ def main(args):
         return
 
     # --- Model Creation ---
-    if args.use_large_model:
-        model = GQEstimatorLarge(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using GQEstimatorLarge for better GPU utilization")
-    else:
-        model = GQEstimator(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using standard GQEstimator")
+    print("\n🚀 Creating optimized 3-channel model...")
+    model = GQEstimator(
+        input_size=48,
+        base_channels=args.base_channels,
+        fc_dims=args.fc_dims
+    ).to(device)
     
-    # --- Dataset Creation with GPU Caching ---
-    print("\n🚀 Creating GPU-cached dataset...")
+    # Show model info
+    info = get_model_info()
+    print(f"\n📊 Model Architecture:")
+    print(f"  • {info['architecture']}")
+    print(f"  • Input: {info['input_channels']} channels (SDF + palm dist + fingertip dist)")
+    print(f"  • Channel progression: {info['channel_progression']}")
+    print(f"  • Final spatial resolution: {info['spatial_resolution']}")
+    print(f"  • Features: {', '.join(info['features'])}")
+    
+    # --- Dataset Creation ---
+    print(f"\n🚀 Creating 3-channel dataset from {args.preprocessed_path}...")
     dataset_start = time.time()
-    dataset = GPUCachedGraspDataset(Path(args.data_path), device=device)
+    
+    if args.use_gpu_cache:
+        print("📦 Using GPU-cached dataset (all data in GPU memory)")
+        dataset = ThreeChannelGPUDataset(Path(args.preprocessed_path), device=device)
+    else:
+        print("📦 Using on-demand dataset with file caching")
+        dataset = ThreeChannelPreprocessedDataset(Path(args.preprocessed_path), cache_size=args.cache_size)
+    
     dataset_time = time.time() - dataset_start
     print(f"Dataset creation time: {dataset_time:.2f}s")
     
@@ -84,19 +97,24 @@ def main(args):
     random.seed(42)  # For reproducible splits
     random.shuffle(indices)
     
+    # Limit dataset size if requested
+    if args.train_size + args.val_size > num_samples:
+        print(f"⚠️  Requested {args.train_size + args.val_size} samples but only {num_samples} available")
+        args.train_size = min(args.train_size, num_samples - args.val_size)
+        args.val_size = min(args.val_size, num_samples - args.train_size)
+    
     train_set = Subset(dataset, indices[:args.train_size])
     val_set = Subset(dataset, indices[-args.val_size:])
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
     
     # --- DataLoaders ---
-    # Note: num_workers=0 is recommended since data is already on GPU
     train_loader = DataLoader(
         train_set, 
         batch_size=args.batch_size, 
         num_workers=args.num_workers,
         shuffle=True,
         drop_last=True,
-        pin_memory=False  # Data is already on GPU
+        pin_memory=False
     )
     val_loader = DataLoader(
         val_set, 
@@ -104,7 +122,7 @@ def main(args):
         num_workers=args.num_workers,
         shuffle=False,
         drop_last=False,
-        pin_memory=False  # Data is already on GPU
+        pin_memory=False
     )
     
     # --- Training Setup ---
@@ -126,13 +144,13 @@ def main(args):
         entity=args.wandb_entity,
         project=args.project_name,
         name=args.run_name,
-        config=args
+        config={**vars(args), **info}
     )
     wandb.watch(model, criterion, log="all", log_freq=100)
     
     # --- Training Loop ---
     print(f"\n🏃‍♂️ Starting training for {args.epochs} epochs...")
-    print("⚡ Data loading time should be near-zero with GPU caching!")
+    print("⚡ Optimized 3-channel architecture for spatial grasp understanding")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
@@ -144,7 +162,7 @@ def main(args):
         total_train_loss = 0
         num_train_samples = 0
         
-        # Timing variables for detailed analysis
+        # Timing variables
         data_loading_time = 0
         forward_pass_time = 0
         backward_pass_time = 0
@@ -156,16 +174,22 @@ def main(args):
             batch_start_time = time.time()
             optimizer.zero_grad()
             
-            # === INSTANT DATA ACCESS (already on GPU!) ===
+            # === DATA LOADING ===
             data_start = time.time()
-            sdf_batch = batch['sdf']
-            grasp_batch = batch['grasp']
-            score_batch = batch['score']
+            input_batch = batch['input']  # (B, 3, 48, 48, 48)
+            score_batch = batch['score']  # (B,)
+            
+            # Move to device if not already there
+            if input_batch.device != device:
+                input_batch = input_batch.to(device)
+            if score_batch.device != device:
+                score_batch = score_batch.to(device)
+            
             data_loading_time += time.time() - data_start
             
             # === FORWARD PASS ===
             forward_start = time.time()
-            pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+            pred_quality = model.forward_with_3channel_input(input_batch)
             loss = criterion(pred_quality, score_batch)
             forward_pass_time += time.time() - forward_start
             
@@ -176,7 +200,7 @@ def main(args):
             backward_pass_time += time.time() - backward_start
             
             # Update metrics
-            batch_size = sdf_batch.size(0)
+            batch_size = input_batch.size(0)
             total_train_loss += loss.item() * batch_size
             num_train_samples += batch_size
             
@@ -197,15 +221,20 @@ def main(args):
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
-                # Validation forward pass (also instant!)
-                sdf_batch = batch['sdf']
-                grasp_batch = batch['grasp']
+                # Validation forward pass
+                input_batch = batch['input']
                 score_batch = batch['score']
                 
-                pred_quality = model.forward_with_sdf(sdf_batch, grasp_batch)
+                # Move to device if not already there
+                if input_batch.device != device:
+                    input_batch = input_batch.to(device)
+                if score_batch.device != device:
+                    score_batch = score_batch.to(device)
+                
+                pred_quality = model.forward_with_3channel_input(input_batch)
                 loss = criterion(pred_quality, score_batch)
 
-                batch_size = sdf_batch.size(0)
+                batch_size = input_batch.size(0)
                 total_val_loss += loss.item() * batch_size
                 num_val_samples += batch_size
                 
@@ -219,7 +248,7 @@ def main(args):
         epoch_time = time.time() - epoch_start_time
         
         # === PERFORMANCE ANALYSIS ===
-        print(f"\nTRAINING BREAKDOWN ⚡")
+        print(f"\n⚡ OPTIMIZED 3-CHANNEL TRAINING BREAKDOWN")
         print(f"Total epoch time: {epoch_time:.2f}s")
         print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
         print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
@@ -238,7 +267,7 @@ def main(args):
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model.pth')
+            torch.save(model.state_dict(), 'best_model_optimized.pth')
             print(f"✅ New best model saved! Val Loss: {avg_val_loss:.4f}")
         
         # Log to wandb
@@ -253,7 +282,6 @@ def main(args):
             "timing/data_loading": data_loading_time,
             "timing/forward_pass": forward_pass_time,
             "timing/backward_pass": backward_pass_time,
-            "gpu_memory_usage_gb": dataset._get_gpu_memory_usage(),
         })
         
         # Early stopping check
@@ -262,19 +290,26 @@ def main(args):
             break
 
     # --- Save Final Model ---
-    model_path = f"{wandb.run.dir}/final_model.pth"
+    model_path = f"{wandb.run.dir}/final_model_optimized.pth"
     torch.save(model.state_dict(), model_path)
     print(f"Final model saved to {model_path}")
-    print(f"Best model saved to best_model.pth")
+    print(f"Best model saved to best_model_optimized.pth")
     
     # --- Final Performance Summary ---
-    print(f"\n🎉 TRAINING COMPLETE! 🎉")
-    print(f"GPU Memory Usage: {dataset._get_gpu_memory_usage():.2f} GB")
-    print(f"Data loading time per epoch: ~{data_loading_time:.4f}s (NEAR ZERO!)")
-    print(f"Your A100 is being used optimally! 🚀")
+    print(f"\n🎉 OPTIMIZED 3-CHANNEL TRAINING COMPLETE! 🎉")
+    print(f"🔥 Architecture: {info['architecture']}")
+    print(f"📊 Training samples: {args.train_size}")
+    print(f"🎯 Best validation loss: {best_val_loss:.4f}")
+    print(f"💾 Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    if args.use_gpu_cache:
+        print(f"📱 GPU Memory Usage: {dataset._get_gpu_memory_usage():.2f} GB")
+    
+    print(f"⚡ Model optimized for computation vs. results balance!")
+    print(f"🚀 Ready for online grasp optimization!")
     
     wandb.finish()
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    main(args) 
