@@ -110,7 +110,7 @@ def main(args):
     # --- Training Setup ---
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = torch.nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.05, total_iters=args.epochs)
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
     
     # --- Model Optimization ---
@@ -158,9 +158,9 @@ def main(args):
             
             # === INSTANT DATA ACCESS (already on GPU!) ===
             data_start = time.time()
-            sdf_batch = batch['sdf']  # Already on GPU!
-            grasp_batch = batch['grasp']  # Already on GPU!
-            score_batch = batch['score']  # Already on GPU!
+            sdf_batch = batch['sdf']
+            grasp_batch = batch['grasp']
+            score_batch = batch['score']
             data_loading_time += time.time() - data_start
             
             # === FORWARD PASS ===
@@ -172,7 +172,6 @@ def main(args):
             # === BACKWARD PASS ===
             backward_start = time.time()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             backward_pass_time += time.time() - backward_start
             
@@ -220,13 +219,13 @@ def main(args):
         epoch_time = time.time() - epoch_start_time
         
         # === PERFORMANCE ANALYSIS ===
-        print(f"\n⚡ ULTRA-FAST TRAINING BREAKDOWN ⚡")
+        print(f"\nTRAINING BREAKDOWN ⚡")
         print(f"Total epoch time: {epoch_time:.2f}s")
         print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
         print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
         
         print(f"\nTraining phase breakdown:")
-        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time/training_time*100:.2f}% - NEAR ZERO! 🚀)")
+        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time/training_time*100:.2f}%)")
         print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
         print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
         
