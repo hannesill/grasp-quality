@@ -13,22 +13,26 @@ from model import GQEstimator, GQEstimatorLarge, GQEstimatorAdvanced
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
+    # Hyperparameters Training
+    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
+    parser.add_argument('--spatial_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of spatial encoder')
+    parser.add_argument('--hand_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of hand encoder')
+    parser.add_argument('--gq_head_dims', nargs='+', type=int, default=[64, 32], help='Dimensions of GQ head')
+    
+    # Hyperparameters Training
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--train_size', type=int, default=5000, help='Number of training samples')
     parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
-    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
+    
+    # Data
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0 recommended for GPU cached data)')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
-    parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
-    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization')
-    parser.add_argument('--use_advanced_model', action='store_true', help='Use advanced model with residual connections and multi-scale features')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -57,27 +61,14 @@ def main(args):
         return
 
     # --- Model Creation ---
-    if args.use_advanced_model:
-        model = GQEstimatorAdvanced(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using GQEstimatorAdvanced with residual connections and multi-scale features")
-    elif args.use_large_model:
-        model = GQEstimatorLarge(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using GQEstimatorLarge for better GPU utilization")
-    else:
-        model = GQEstimator(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using standard GQEstimator")
+    model = GQEstimator(
+        input_size=48, 
+        base_channels=args.base_channels, 
+        spatial_encoder_dims=args.spatial_encoder_dims,
+        hand_encoder_dims=args.hand_encoder_dims,
+        gq_head_dims=args.gq_head_dims
+    ).to(device)
+    print("Using standard GQEstimator")
     
     # --- Dataset Creation with GPU Caching ---
     print("\n🚀 Creating GPU-cached dataset...")
@@ -139,8 +130,7 @@ def main(args):
     wandb.watch(model, criterion, log="all", log_freq=100)
     
     # --- Training Loop ---
-    print(f"\n🏃‍♂️ Starting training for {args.epochs} epochs...")
-    print("⚡ Data loading time should be near-zero with GPU caching!")
+    print(f"\nStarting training for {args.epochs} epochs...")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
@@ -227,15 +217,15 @@ def main(args):
         epoch_time = time.time() - epoch_start_time
         
         # === PERFORMANCE ANALYSIS ===
-        print(f"\nTRAINING BREAKDOWN ⚡")
+        print(f"\nTRAINING BREAKDOWN")
         print(f"Total epoch time: {epoch_time:.2f}s")
-        print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
-        print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
-        
-        print(f"\nTraining phase breakdown:")
-        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time/training_time*100:.2f}%)")
-        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
-        print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
+        print(f"Training time: {training_time:.2f}s ({training_time:.1f}%)")
+        print(f"Validation time: {validation_time:.2f}s ({validation_time:.1f}%)")
+        print("-"*50)
+        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time:.2f}%)")
+        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time:.1f}%)")
+        print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time:.1f}%)")
+        print("-"*50)
         
         # Step the scheduler
         scheduler.step(avg_val_loss)
