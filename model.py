@@ -12,13 +12,13 @@ class GQEstimator(nn.Module):
         # 3D Convolutional Neural Network
         self.conv_stages = nn.Sequential(
             # Stage 1: 1x48x48x48 -> 8x24x24x24
-            self._make_conv_block(1, base_channels, stride=2),
+            self._make_conv_block(1, base_channels, stride=1),
             # Stage 2: 8x24x24x24 -> 16x12x12x12
-            self._make_conv_block(base_channels, base_channels*2, stride=2),
+            self._make_conv_block(base_channels, base_channels*2, stride=1),
             # Stage 3: 16x12x12x12 -> 32x6x6x6
-            self._make_conv_block(base_channels*2, base_channels*4, stride=2),
+            self._make_conv_block(base_channels*2, base_channels*4, stride=1),
             # Stage 4: 32x6x6x6 -> 64x3x3x3
-            self._make_conv_block(base_channels*4, base_channels*8, stride=2),
+            self._make_conv_block(base_channels*4, base_channels*8, stride=1),
         )
         
         # Global pooling: 64x3x3x3 -> 64x1x1x1
@@ -101,11 +101,14 @@ class GQEstimator(nn.Module):
         batch_size = features.shape[0]
         features = features.view(batch_size, -1)
         
+        # Encode through spatial encoder
+        encoded_features = self.spatial_encoder(features)
+        
         # Return appropriate shape
         if single_sample:
-            return features.squeeze(0)  # (encoded_size,)
+            return encoded_features.squeeze(0)  # (encoded_size,)
         else:
-            return features  # (B, encoded_size)
+            return encoded_features  # (B, encoded_size)
 
     def forward(self, x):
         """
