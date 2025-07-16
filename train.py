@@ -9,7 +9,7 @@ import wandb
 import numpy as np
 
 from dataset import GPUCachedGraspDataset
-from model import GQEstimator, GQEstimatorLarge, GQEstimatorAdvanced
+from model import GQEstimator
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
