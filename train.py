@@ -9,7 +9,7 @@ import wandb
 import numpy as np
 
 from dataset import GPUCachedGraspDataset
-from model import GQEstimator
+from model import GQEstimator, ImprovedGQEstimator, EfficientGQEstimator
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
@@ -18,6 +18,8 @@ def parse_args():
     parser.add_argument('--spatial_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of spatial encoder')
     parser.add_argument('--hand_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of hand encoder')
     parser.add_argument('--gq_head_dims', nargs='+', type=int, default=[64, 32], help='Dimensions of GQ head')
+    parser.add_argument('--improved', action='store_true', help='Use improved model')
+    parser.add_argument('--efficient', action='store_true', help='Use efficient model')
     
     # Hyperparameters Training
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
@@ -61,14 +63,33 @@ def main(args):
         return
 
     # --- Model Creation ---
-    model = GQEstimator(
+    if args.improved:
+        model = ImprovedGQEstimator(
         input_size=48, 
         base_channels=args.base_channels, 
         spatial_encoder_dims=args.spatial_encoder_dims,
         hand_encoder_dims=args.hand_encoder_dims,
         gq_head_dims=args.gq_head_dims
     ).to(device)
-    print("Using standard GQEstimator")
+        print("Using standard GQEstimator")
+    elif args.efficient:
+        model = EfficientGQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            spatial_encoder_dims=args.spatial_encoder_dims,
+            hand_encoder_dims=args.hand_encoder_dims,
+            gq_head_dims=args.gq_head_dims
+        ).to(device)
+        print("Using efficient GQEstimator")
+    else:
+        model = GQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            spatial_encoder_dims=args.spatial_encoder_dims,
+            hand_encoder_dims=args.hand_encoder_dims,
+            gq_head_dims=args.gq_head_dims
+        ).to(device)
+        print("Using standard GQEstimator")
     
     # --- Dataset Creation with GPU Caching ---
     print("\n🚀 Creating GPU-cached dataset...")
