@@ -2,8 +2,8 @@ import time
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader, Subset
-from dataset import GraspDataset, OptimizedGraspDataset
-from model import GQEstimator
+from src.dataset import GraspDataset, OptimizedGraspDataset
+from src.model import GQEstimator
 
 def benchmark_training_approaches():
     """

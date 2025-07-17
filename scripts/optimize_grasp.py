@@ -7,8 +7,8 @@ from tqdm import tqdm
 import time
 import shutil
 
-from model import GQEstimator
-from dataset import GraspDataset
+from src.model import GQEstimator
+from src.dataset import GraspDataset
 
 
 class GraspOptimizer:
@@ -164,7 +164,7 @@ class GraspOptimizer:
         grasp_config.requires_grad_(True)
         
         # Setup optimizer for grasp configuration only
-        optimizer = torch.optim.Adam([grasp_config], lr=learning_rate)
+        optimizer = torch.optim.Adam([grasp_config], lr=learning_rate, weight_decay=2.0)
         
         # Track optimization history
         quality_history = []
@@ -188,14 +188,14 @@ class GraspOptimizer:
         prev_quality = float('-inf')  # For maximization, start with negative infinity
         
         # Optimization loop
-        for iteration in tqdm(range(max_iterations), disable=not verbose):
+        for iteration in tqdm(range(max_iterations)):
             optimizer.zero_grad()
             quality_score = self.predict_grasp_quality(sdf, grasp_config)
-            loss = -quality_score  # Minimize negative quality to maximize quality
+            loss = -quality_score
 
             loss.backward()
             optimizer.step()
-            quality_history.append(quality_score.item())  # Store positive quality, not negative loss
+            quality_history.append(quality_score.item())
             grasp_history.append(grasp_config.detach().clone().cpu())
             
             # Check for convergence
@@ -210,9 +210,8 @@ class GraspOptimizer:
             if verbose and (iteration + 1) % 10 == 0:
                 print(f"Iteration {iteration+1}: Quality score = {current_quality:.6f}")
         
-        if verbose:
-            print(f"Final grasp quality: {quality_history[-1]:.6f}")
-            print(f"Improvement: {quality_history[-1] - quality_history[0]:.6f}")
+        print(f"Final grasp quality: {quality_history[-1]:.6f}")
+        print(f"Improvement: {quality_history[-1] - quality_history[0]:.6f}")
         
         return {
             'optimized_grasp': grasp_config.detach().cpu(),
@@ -305,6 +304,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on (cuda/cpu)')
     parser.add_argument('--save_plot', type=str, default=None, help='Path to save visualization plot')
     parser.add_argument('--save_path', type=str, default='data/output', help='Path to save optimized grasps')
+    parser.add_argument('--verbose', action='store_true', default=False, help='Verbose output')
     return parser.parse_args()
 
 
@@ -335,7 +335,7 @@ def main():
         learning_rate=args.lr,
         max_iterations=args.max_iter,
         tolerance=args.tolerance,
-        verbose=True
+        verbose=args.verbose
     )
     
     print(f"\nOptimization Summary:")

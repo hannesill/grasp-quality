@@ -28,12 +28,13 @@ visualShapeId = pybullet.createVisualShape(
                 specularColor=[0.4, .4, 0],
                 visualFramePosition=[0, 0, 0],
                 meshScale=1)
-object_id = pybullet.createMultiBody(baseMass=1,
-                    baseInertialFramePosition=[0, 0, 0],
-                    baseVisualShapeIndex=visualShapeId,
-                    baseCollisionShapeIndex=visualShapeId,
-                    basePosition=[0,0,0],
-                    baseOrientation=[0,0,0,1])
+object_id = pybullet.createMultiBody(
+            baseMass=1,
+            baseInertialFramePosition=[0, 0, 0],
+            baseVisualShapeIndex=visualShapeId,
+            baseCollisionShapeIndex=visualShapeId,
+            basePosition=[0,0,0],
+            baseOrientation=[0,0,0,1])
                         
 # Load grasps
 data = np.load(Path(args.data_path) / "recording.npz")
