@@ -9,7 +9,7 @@ import wandb
 import numpy as np
 
 from dataset import GPUCachedGraspDataset
-from model import GQEstimator, GQEstimatorLarge
+from model import GQEstimator
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
@@ -27,7 +27,6 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
-    parser.add_argument('--use_large_model', action='store_true', help='Use larger model for better A100 GPU utilization')
     return parser.parse_args()
 
 class EarlyStopping:
@@ -56,20 +55,11 @@ def main(args):
         return
 
     # --- Model Creation ---
-    if args.use_large_model:
-        model = GQEstimatorLarge(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using GQEstimatorLarge for better GPU utilization")
-    else:
-        model = GQEstimator(
-            input_size=48, 
-            base_channels=args.base_channels, 
-            fc_dims=args.fc_dims
-        ).to(device)
-        print("Using standard GQEstimator")
+    model = GQEstimator(
+        input_size=48, 
+        base_channels=args.base_channels, 
+        fc_dims=args.fc_dims
+    ).to(device)
     
     # --- Dataset Creation with GPU Caching ---
     print("\n🚀 Creating GPU-cached dataset...")
