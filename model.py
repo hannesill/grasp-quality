@@ -8,11 +8,7 @@ class GQEstimator(nn.Module):
         print("Initializing GQEstimator")
         print(f"Input size: {input_size}")
 
-        # Input is {input_size}x{input_size}x{input_size}
-        
-        # Calculate output size after convolutions
-        conv_output_size = input_size // 16  # After 4 max pooling layers with stride 2
-
+        # Input is 1x48x48x48
         # 3D Convolutional Neural Network
         self.conv_block = nn.Sequential(
             # First block: 48x48x48 -> 24x24x24
@@ -22,7 +18,7 @@ class GQEstimator(nn.Module):
             nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1), # 16x48x48x48 (depth)
             nn.BatchNorm3d(base_channels),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.MaxPool3d(kernel_size=2, stride=2), # 16x24x24x24
             
             # Second block: 24x24x24 -> 12x12x12
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
@@ -31,7 +27,7 @@ class GQEstimator(nn.Module):
             nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24 (depth)
             nn.BatchNorm3d(base_channels*2),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.MaxPool3d(kernel_size=2, stride=2), # 32x12x12x12
             
             # Third block: 12x12x12 -> 6x6x6
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
@@ -52,6 +48,7 @@ class GQEstimator(nn.Module):
         )
 
         # Calculate flattened size
+        conv_output_size = input_size // 8  # After 3 max pooling layers with stride 2
         flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
 
         print(f"Flattened size: {flattened_size}")
