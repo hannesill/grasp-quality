@@ -3,6 +3,10 @@ from pathlib import Path
 import pybullet
 import argparse
 import numpy as np
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data_path")
@@ -57,4 +61,6 @@ for i in sorted_indx:
             pybullet.resetJointState(hand_id, jointIndex=j + 1, targetValue=grasp[7 + k], targetVelocity=0)
     
     print(f"Score {data['scores'][i]}")
-    input()
+
+    while pybullet.isConnected():
+        pybullet.stepSimulation()
