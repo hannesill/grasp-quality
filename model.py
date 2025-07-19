@@ -37,7 +37,7 @@ class GQEstimator(nn.Module):
         )
 
         # Calculate flattened size
-        conv_output_size = input_size // 8  # After 3 max pooling layers with stride 2
+        conv_output_size = input_size // 16      # After 4 max pooling layers with stride 2
         flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
 
         print(f"Flattened size: {flattened_size}")
