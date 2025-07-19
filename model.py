@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class GQEstimator(nn.Module):
-    def __init__(self, input_size=48, base_channels=16, fc_dims=[256, 128, 64]):
+    def __init__(self, input_size=48, base_channels=8, fc_dims=[64, 32]):
         super(GQEstimator, self).__init__()
 
         print("Initializing GQEstimator")
@@ -15,16 +15,10 @@ class GQEstimator(nn.Module):
             nn.Conv3d(1, base_channels, kernel_size=3, padding=1), # 16x48x48x48
             nn.BatchNorm3d(base_channels),
             nn.ReLU(),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1), # 16x48x48x48 (depth)
-            nn.BatchNorm3d(base_channels),
-            nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2), # 16x24x24x24
             
             # Second block: 24x24x24 -> 12x12x12
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
-            nn.BatchNorm3d(base_channels*2),
-            nn.ReLU(), 
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24 (depth)
             nn.BatchNorm3d(base_channels*2),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2), # 32x12x12x12
@@ -33,18 +27,13 @@ class GQEstimator(nn.Module):
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
             nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12 (depth)
-            nn.BatchNorm3d(base_channels*4),
-            nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2), # 64x6x6x6
-            
-            # Fourth block: 6x6x6 (no pooling - preserve final resolution)
+
+            # Fourth block: 6x6x6 -> 3x3x3
             nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1), # 64x6x6x6
             nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1), # 64x6x6x6 (more depth)
-            nn.BatchNorm3d(base_channels*4),
-            nn.ReLU()
+            nn.MaxPool3d(kernel_size=2, stride=2), # 64x3x3x3
         )
 
         # Calculate flattened size
@@ -55,11 +44,11 @@ class GQEstimator(nn.Module):
 
         # Conv Output Network
         self.conv_output_net = nn.Sequential(
-            nn.Linear(flattened_size, 1024),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(),
-            nn.Linear(1024, 256),
+            nn.Linear(flattened_size, 256),
             nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
         )
 
@@ -68,14 +57,11 @@ class GQEstimator(nn.Module):
             nn.Linear(19, 64),  # Add 7 (hand pose) + 12 (fingers)
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
         )
 
         # Grasp Quality Head
         layers = []
-        prev_dim = 256 + 128 
+        prev_dim = 128 + 64 
         
         for dim in fc_dims:
             layers.extend([
