@@ -41,13 +41,14 @@ class GraspDataset(Dataset):
                 sdf = scene_data["sdf"]
                 grasps = scene_data["grasps"]
                 scores = scene_data["scores"]
+                translation = scene_data["translation"]
                 scale = scene_data["global_scale"]
-                return sdf, grasps, scores, scale
+                return sdf, grasps, scores, translation, scale
 
     def __getitem__(self, idx):
         scene_idx, grasp_idx = self.grasp_locations[idx]
 
-        sdf, grasps, scores, scale = self._get_scene_data(scene_idx)
+        sdf, grasps, scores, translation, scale = self._get_scene_data(scene_idx)
 
         # Handle IndexError by selecting a random valid grasp
         num_grasps = grasps.shape[0]
@@ -59,6 +60,7 @@ class GraspDataset(Dataset):
 
         return {
             "sdf": torch.from_numpy(sdf).float(),
+            "translation": torch.tensor(translation, dtype=torch.float32),
             "scale": torch.tensor(scale, dtype=torch.float32),
             "grasp": torch.from_numpy(grasp).float(),
             "score": torch.tensor(score, dtype=torch.float32),
