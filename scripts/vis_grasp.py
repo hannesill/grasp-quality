@@ -9,7 +9,8 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 parser = argparse.ArgumentParser()
-parser.add_argument("data_path")
+parser.add_argument("data_path", type=str, help="Path to the data")
+parser.add_argument("--grasp_selection", type=str, default="highest", help="Which grasp to visualize: 'highest', 'lowest', or an integer index")
 args = parser.parse_args()
 
 pybullet.connect(pybullet.GUI)
@@ -45,22 +46,27 @@ data = np.load(Path(args.data_path) / "recording.npz")
 
 # Sort by grasp score
 sorted_indx = np.argsort(data["scores"])[::-1]
-print(data["grasps"].shape)
 
-for i in sorted_indx:
-    grasp = data["grasps"][i]
+if args.grasp_selection == "highest":
+    sorted_indx = sorted_indx[0]
+elif args.grasp_selection == "lowest":
+    sorted_indx = sorted_indx[-1]
+else:
+    sorted_indx = int(args.grasp_selection)
 
-    # Set hand pose
-    pybullet.resetBasePositionAndOrientation(bodyUniqueId=hand_id, posObj=grasp[:3], ornObj=grasp[3:7])
-    
-    # Set joint angles
-    for k, j in enumerate([1,2,3, 7,8,9, 13,14,15, 19,20,21]):
-        pybullet.resetJointState(hand_id, jointIndex=j, targetValue=grasp[7 + k], targetVelocity=0)
-        # Set coupled joint
-        if j in [3, 9, 15, 21]:
-            pybullet.resetJointState(hand_id, jointIndex=j + 1, targetValue=grasp[7 + k], targetVelocity=0)
-    
-    print(f"Score {data['scores'][i]}")
+grasp = data["grasps"][sorted_indx]
 
-    while pybullet.isConnected():
-        pybullet.stepSimulation()
+# Set hand pose
+pybullet.resetBasePositionAndOrientation(bodyUniqueId=hand_id, posObj=grasp[:3], ornObj=grasp[3:7])
+
+# Set joint angles
+for k, j in enumerate([1,2,3, 7,8,9, 13,14,15, 19,20,21]):
+    pybullet.resetJointState(hand_id, jointIndex=j, targetValue=grasp[7 + k], targetVelocity=0)
+    # Set coupled joint
+    if j in [3, 9, 15, 21]:
+        pybullet.resetJointState(hand_id, jointIndex=j + 1, targetValue=grasp[7 + k], targetVelocity=0)
+
+print(f"Score {data['scores'][sorted_indx]}")
+
+while pybullet.isConnected():
+    pybullet.stepSimulation()
