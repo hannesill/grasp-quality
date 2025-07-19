@@ -17,12 +17,14 @@ class GraspDataset(Dataset):
 
         if self.preload:
             self.sdfs = []
+            self.translations = []
             self.scales = []
             self.grasps = []
             self.scores = []
             for file in tqdm(self.data_files, desc="Loading scenes"):
                 with np.load(file) as scene_data:
                     self.sdfs.append(scene_data["sdf"])
+                    self.translations.append(scene_data["translation"])
                     self.scales.append(scene_data["global_scale"])
                     self.grasps.append(scene_data["grasps"])
                     self.scores.append(scene_data["scores"])
@@ -35,20 +37,20 @@ class GraspDataset(Dataset):
 
     def _get_scene_data(self, scene_idx):
         if self.preload:
-            return self.sdfs[scene_idx], self.grasps[scene_idx], self.scores[scene_idx], self.scales[scene_idx]
+            return self.sdfs[scene_idx], self.translations[scene_idx], self.scales[scene_idx], self.grasps[scene_idx], self.scores[scene_idx]
         else:
             with np.load(self.data_files[scene_idx]) as scene_data:
                 sdf = scene_data["sdf"]
-                grasps = scene_data["grasps"]
-                scores = scene_data["scores"]
                 translation = scene_data["translation"]
                 scale = scene_data["global_scale"]
-                return sdf, grasps, scores, translation, scale
+                grasps = scene_data["grasps"]
+                scores = scene_data["scores"]
+                return sdf, translation, scale, grasps, scores
 
     def __getitem__(self, idx):
         scene_idx, grasp_idx = self.grasp_locations[idx]
 
-        sdf, grasps, scores, translation, scale = self._get_scene_data(scene_idx)
+        sdf, translation, scale, grasps, scores = self._get_scene_data(scene_idx)
 
         # Handle IndexError by selecting a random valid grasp
         num_grasps = grasps.shape[0]
