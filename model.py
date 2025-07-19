@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class GQEstimator(nn.Module):
-    def __init__(self, input_size=48, base_channels=8, fc_dims=[64, 32]):
+    def __init__(self, input_size=48, base_channels=8, fc_dims=[32, 16]):
         super(GQEstimator, self).__init__()
 
         print("Initializing GQEstimator")
@@ -47,21 +47,21 @@ class GQEstimator(nn.Module):
             nn.Linear(flattened_size, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
+            nn.Linear(256, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
         )
 
         # Hand Pose Network
         self.hand_pose_net = nn.Sequential(
-            nn.Linear(19, 64),  # Add 7 (hand pose) + 12 (fingers)
-            nn.BatchNorm1d(64),
+            nn.Linear(19, 32),  # Add 7 (hand pose) + 12 (fingers)
+            nn.BatchNorm1d(32),
             nn.ReLU(),
         )
 
         # Grasp Quality Head
         layers = []
-        prev_dim = 128 + 64 
+        prev_dim = 64 + 32 
         
         for dim in fc_dims:
             layers.extend([
