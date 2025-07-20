@@ -13,19 +13,19 @@ from model import GQEstimator
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--train_size', type=int, default=5000, help='Number of training samples')
-    parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
-    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--train_size', type=int, default=5000000, help='Number of training samples')
+    parser.add_argument('--val_size', type=int, default=500000, help='Number of validation samples')
+    parser.add_argument('--base_channels', type=int, default=8, help='Base channels for the CNN')
+    parser.add_argument('--fc_dims', nargs='+', type=int, default=[256, 128, 64], help='Dimensions of FC layers')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0 recommended for GPU cached data)')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     return parser.parse_args()
 
@@ -121,8 +121,7 @@ def main(args):
     wandb.watch(model, criterion, log="all", log_freq=100)
     
     # --- Training Loop ---
-    print(f"\n🏃‍♂️ Starting training for {args.epochs} epochs...")
-    print("⚡ Data loading time should be near-zero with GPU caching!")
+    print(f"Starting training for {args.epochs} epochs...")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
@@ -262,11 +261,7 @@ def main(args):
     print(f"Final model saved to {model_path}")
     print(f"Best model saved to best_model.pth (local) and {wandb.run.dir}/best_model.pth (wandb)")
     
-    # --- Final Performance Summary ---
     print(f"\n🎉 TRAINING COMPLETE! 🎉")
-    print(f"GPU Memory Usage: {dataset._get_gpu_memory_usage():.2f} GB")
-    print(f"Data loading time per epoch: ~{data_loading_time:.4f}s (NEAR ZERO!)")
-    print(f"Your A100 is being used optimally! 🚀")
     
     wandb.finish()
 

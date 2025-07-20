@@ -2,71 +2,41 @@ import torch
 import torch.nn as nn
 
 class GQEstimator(nn.Module):
-    def __init__(self, input_size=48, base_channels=8, fc_dims=[32, 16]):
+    def __init__(self, input_size=48, base_channels=16, fc_dims=[256, 128, 64]):
         super(GQEstimator, self).__init__()
 
         print("Initializing GQEstimator")
         print(f"Input size: {input_size}")
 
-        # Input is 1x48x48x48
         # 3D Convolutional Neural Network
         self.conv_block = nn.Sequential(
-            # First block: 48x48x48 -> 24x24x24
             nn.Conv3d(1, base_channels, kernel_size=3, padding=1), # 16x48x48x48
-            nn.BatchNorm3d(base_channels),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2), # 16x24x24x24
-            
-            # Second block: 24x24x24 -> 12x12x12
+            nn.MaxPool3d(kernel_size=2, stride=2),
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1), # 32x24x24x24
-            nn.BatchNorm3d(base_channels*2),
-            nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2), # 32x12x12x12
-            
-            # Third block: 12x12x12 -> 6x6x6
+            nn.ReLU(), 
+            nn.MaxPool3d(kernel_size=2, stride=2),
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1), # 64x12x12x12
-            nn.BatchNorm3d(base_channels*4),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2), # 64x6x6x6
-
-            # Fourth block: 6x6x6 -> 3x3x3
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1), # 64x6x6x6
-            nn.BatchNorm3d(base_channels*4),
+            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1), # 128x6x6x6
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2), # 64x3x3x3
+            nn.MaxPool3d(kernel_size=2, stride=2) # 128x3x3x3
         )
 
         # Calculate flattened size
-        conv_output_size = input_size // 16      # After 4 max pooling layers with stride 2
-        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*4)
+        conv_output_size = input_size // 16  # After 4 max pooling layers with stride 2
+        flattened_size = conv_output_size * conv_output_size * conv_output_size * (base_channels*8)
 
         print(f"Flattened size: {flattened_size}")
 
-        # Conv Output Network
-        self.conv_output_net = nn.Sequential(
-            nn.Linear(flattened_size, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Linear(256, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-        )
-
-        # Hand Pose Network
-        self.hand_pose_net = nn.Sequential(
-            nn.Linear(19, 32),  # Add 7 (hand pose) + 12 (fingers)
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-        )
-
-        # Grasp Quality Head
+        # Grasp quality head
         layers = []
-        prev_dim = 64 + 32 
+        prev_dim = flattened_size + 19  # Add 7 (hand pose) + 12 (fingers)
         
         for dim in fc_dims:
             layers.extend([
                 nn.Linear(prev_dim, dim),
-                nn.BatchNorm1d(dim),
                 nn.ReLU()
             ])
             prev_dim = dim
@@ -128,13 +98,9 @@ class GQEstimator(nn.Module):
         """
         # Encode SDFs
         sdf_features = self.encode_sdf(sdf_batch)
-
-        # Encode conv output and hand pose
-        conv_output = self.conv_output_net(sdf_features)
-        hand_pose_output = self.hand_pose_net(grasp_batch)
-
+        
         # Concatenate features and forward pass
-        flattened_features = torch.cat([conv_output, hand_pose_output], dim=1)
+        flattened_features = torch.cat([sdf_features, grasp_batch], dim=1)
         grasp_quality = self.gq_head(flattened_features)
-
+        
         return grasp_quality.view(-1)
