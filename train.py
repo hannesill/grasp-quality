@@ -11,6 +11,24 @@ import numpy as np
 from dataset import GPUCachedGraspDataset
 from model import GQEstimator
 
+"""
+This script trains a Grasp Quality Estimator (GQEstimator) using a GPU-cached dataset.
+It supports loading pre-trained model weights and logging to Weights & Biases (WandB).
+
+Usage Examples:
+  # Start new training:
+  python train.py --epochs 100 --batch_size 128 --lr 1e-3
+  
+  # Load pre-trained weights and continue training:
+  python train.py --resume_from_saved_model best_model.pth --epochs 100
+  
+  # Train with custom model size:
+  python train.py --base_channels 16 --fc_dims 512 256 128 --batch_size 64
+  
+  # Train with large dataset:
+  python train.py --train_size 1000000 --val_size 100000 --batch_size 256
+"""
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -27,7 +45,33 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
+    parser.add_argument('--resume_from_saved_model', type=str, default=None, help='Path to saved model weights (.pth file) to initialize the model with')
     return parser.parse_args()
+
+def load_model_weights(model_path, model, device):
+    """Load model weights from a saved .pth file."""
+    if not Path(model_path).exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    print(f"🔄 Loading model weights from {model_path}")
+    
+    try:
+        # Load the state dict
+        state_dict = torch.load(model_path, map_location=device)
+        
+        # Handle different save formats
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            # Full checkpoint format
+            model.load_state_dict(state_dict['model_state_dict'])
+        else:
+            # Simple state dict format
+            model.load_state_dict(state_dict)
+            
+        print(f"✅ Model weights loaded successfully!")
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model weights: {e}. "
+                         f"This might be due to model architecture mismatch.")
 
 class EarlyStopping:
     """Early stopping utility to prevent overfitting."""
@@ -60,6 +104,10 @@ def main(args):
         base_channels=args.base_channels, 
         fc_dims=args.fc_dims
     ).to(device)
+    
+    # Load pre-trained weights if specified
+    if args.resume_from_saved_model:
+        load_model_weights(args.resume_from_saved_model, model, device)
     
     # --- Dataset Creation with GPU Caching ---
     print("\n🚀 Creating GPU-cached dataset...")
@@ -121,7 +169,10 @@ def main(args):
     wandb.watch(model, criterion, log="all", log_freq=100)
     
     # --- Training Loop ---
-    print(f"Starting training for {args.epochs} epochs...")
+    if args.resume_from_saved_model:
+        print(f"Starting training for {args.epochs} epochs with pre-trained weights...")
+    else:
+        print(f"Starting training for {args.epochs} epochs from scratch...")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
