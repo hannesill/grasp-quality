@@ -228,7 +228,12 @@ def main(args):
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            # Save to local directory (will be overwritten by other runs)
             torch.save(model.state_dict(), 'best_model.pth')
+            # Also save to wandb run directory (unique per run)
+            best_model_path = f"{wandb.run.dir}/best_model.pth"
+            torch.save(model.state_dict(), best_model_path)
+            wandb.save('best_model.pth')
             print(f"✅ New best model saved! Val Loss: {avg_val_loss:.4f}")
         
         # Log to wandb
@@ -255,7 +260,7 @@ def main(args):
     model_path = f"{wandb.run.dir}/final_model.pth"
     torch.save(model.state_dict(), model_path)
     print(f"Final model saved to {model_path}")
-    print(f"Best model saved to best_model.pth")
+    print(f"Best model saved to best_model.pth (local) and {wandb.run.dir}/best_model.pth (wandb)")
     
     # --- Final Performance Summary ---
     print(f"\n🎉 TRAINING COMPLETE! 🎉")
