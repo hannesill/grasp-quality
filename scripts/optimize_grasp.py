@@ -4,7 +4,6 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import time
 import shutil
 import os
 import sys
@@ -30,8 +29,11 @@ class GraspOptimizer:
         print(f"Using device: {self.device}")
         
         # Load the GQ model
+        weights = torch.load(model_path, map_location=self.device)
+        # weights = {k.replace('_orig_mod.', ''): v for k, v in weights.items()}
+        # torch.save(weights, model_path)
         self.model = GQEstimator(**model_config)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.model.load_state_dict(weights)
         self.model.to(self.device)
         self.model.eval()
         
@@ -125,7 +127,7 @@ class GraspOptimizer:
         
         return grasp_config.to(self.device)
     
-    def predict_grasp_quality(self, sdf, grasp_config):
+    def predict_grasp_quality(self, sdf_features, grasp_config):
         """
         Predict grasp quality for given SDF and grasp configuration.
         
@@ -136,16 +138,9 @@ class GraspOptimizer:
         Returns:
             torch.Tensor: Predicted grasp quality score
         """
-        # Ensure gradients are not computed for SDF (it's fixed)
-        sdf = sdf.detach()
-        
-        # Encode SDF (gradients disabled for model parameters)
-        with torch.no_grad():
-            sdf_features = self.model.encode_sdf(sdf.unsqueeze(0))
-        
         # Concatenate SDF features with grasp configuration
         # Only grasp_config should have gradients enabled
-        combined_features = torch.cat([sdf_features.detach(), grasp_config.unsqueeze(0)], dim=1)
+        combined_features = torch.cat([sdf_features, grasp_config.unsqueeze(0)], dim=1)
         quality = self.model(combined_features)
         
         return quality.squeeze()
@@ -174,8 +169,12 @@ class GraspOptimizer:
         else:
             grasp_config = initial_grasp.clone().to(self.device)
         
-        # Enable gradient computation for grasp configuration
         grasp_config.requires_grad_(True)
+
+        sdf = sdf.detach()
+        with torch.no_grad():
+            sdf_features = self.model.encode_sdf(sdf.unsqueeze(0))
+            sdf_features = sdf_features.detach()
         
         # Setup optimizer for grasp configuration only
         optimizer = torch.optim.Adam([grasp_config], lr=learning_rate)
@@ -186,7 +185,7 @@ class GraspOptimizer:
         
         if verbose:
             print(f"Starting optimization with {max_iterations} max iterations...")
-            initial_quality = self.predict_grasp_quality(sdf, grasp_config).item()
+            initial_quality = self.predict_grasp_quality(sdf_features, grasp_config).item()
             print(f"Initial grasp quality: {initial_quality:.6f}")
             
             # Verify gradient computation on first iteration
@@ -204,7 +203,7 @@ class GraspOptimizer:
         # Optimization loop
         for iteration in tqdm(range(max_iterations)):
             optimizer.zero_grad()
-            quality_score = self.predict_grasp_quality(sdf, grasp_config).squeeze()
+            quality_score = self.predict_grasp_quality(sdf_features, grasp_config).squeeze()
             
             log_prob = self.nflow_model.log_prob(grasp_config.unsqueeze(0)).squeeze()
             loss = -quality_score - regularization_strength * log_prob
@@ -331,7 +330,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    model_config = {'input_size': 48, 'base_channels': 16, 'fc_dims': [32, 16]}
+    model_config = {'input_size': 48, 'base_channels': 8, 'fc_dims': [512, 128, 64]}
     model_config.update(args.model_config)
 
     nflow_model_config = {'input_dim': 19}
@@ -351,8 +350,6 @@ def main():
     # Get a test scene
     scene = dataset[args.scene_idx]
     sdf = scene['sdf'].to(optimizer.device)
-    scale = scene['scale']
-    translation = scene['translation']
     
     print(f"Optimizing grasp for scene {args.scene_idx}")
     print(f"SDF shape: {sdf.shape}")
@@ -367,8 +364,8 @@ def main():
         regularization_strength=args.regularization_strength,
     )
 
-    # Rescale grasp position coordinates back to original scale
-    # First 3 elements are x,y,z position coordinates
+    scale = scene['scale']
+    translation = scene['translation']
     result['optimized_grasp'][:3] = result['optimized_grasp'][:3] / scale + translation
     
     print(f"\nOptimization Summary:")
