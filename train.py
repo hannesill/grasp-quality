@@ -62,10 +62,22 @@ def load_model_weights(model_path, model, device):
         # Handle different save formats
         if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
             # Full checkpoint format
-            model.load_state_dict(state_dict['model_state_dict'])
-        else:
-            # Simple state dict format
-            model.load_state_dict(state_dict)
+            state_dict = state_dict['model_state_dict']
+        
+        # Handle compiled model prefix (_orig_mod.)
+        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+            print("   Detected compiled model weights, removing _orig_mod. prefix...")
+            new_state_dict = {}
+            for key, value in state_dict.items():
+                if key.startswith('_orig_mod.'):
+                    new_key = key[10:]  # Remove '_orig_mod.' prefix
+                    new_state_dict[new_key] = value
+                else:
+                    new_state_dict[key] = value
+            state_dict = new_state_dict
+        
+        # Load the cleaned state dict
+        model.load_state_dict(state_dict)
             
         print(f"✅ Model weights loaded successfully!")
         
