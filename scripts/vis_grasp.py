@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data_path", type=str, help="Path to the data")
-parser.add_argument("--grasp_selection", type=str, default="highest", help="Which grasp to visualize: 'highest', 'lowest', or an integer index")
+parser.add_argument("--filter", type=str, default="highest", help="Which grasp to visualize: 'highest', 'lowest', or an integer index")
 args = parser.parse_args()
 
 pybullet.connect(pybullet.GUI)
@@ -47,12 +47,24 @@ data = np.load(Path(args.data_path) / "recording.npz")
 # Sort by grasp score
 sorted_indx = np.argsort(data["scores"])[::-1]
 
-if args.grasp_selection == "highest":
+print(args.filter.replace('.','',1).isdigit())
+if args.filter == "highest":
+    print("Highest scoring grasp")
     sorted_indx = sorted_indx[0]
-elif args.grasp_selection == "lowest":
+elif args.filter == "lowest":
+    print("Lowest scoring grasp")
     sorted_indx = sorted_indx[-1]
+elif '.' in args.filter:
+    print(f"Grasp with score below {args.filter}")
+    threshold = float(args.filter)
+    filtered_indices = sorted_indx[data["scores"][sorted_indx] <= threshold]
+    if len(filtered_indices) == 0:
+        print(f"No grasps found with score below {threshold}")
+        sys.exit(1)
+    sorted_indx = filtered_indices[0]
 else:
-    sorted_indx = int(args.grasp_selection)
+    print(f"Grasp with index {args.filter}")
+    sorted_indx = int(args.filter)
 
 grasp = data["grasps"][sorted_indx]
 
