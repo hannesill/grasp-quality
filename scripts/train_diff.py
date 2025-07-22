@@ -99,12 +99,14 @@ def main(args):
     
     # Pre-compute SDF features
     print("Pre-computing SDF features...")
-    sdf_features_cache = torch.zeros(len(dataset), args.sdf_feature_dim, device=device)
+    sdf_features_cache = torch.zeros(len(dataset.sdfs), args.sdf_feature_dim, device=device)
     with torch.no_grad():
         for i, sdf in enumerate(tqdm(dataset.sdfs, desc="Encoding SDFs")):
             sdf = torch.from_numpy(sdf).float().to(device)
             features = object_encoder(sdf.unsqueeze(0)).view(-1)
             sdf_features_cache[i] = features
+    del object_encoder
+    torch.cuda.empty_cache()
     
     best_val_loss = float('inf')
 
