@@ -1,4 +1,3 @@
-# Usage example: python3 vis_grasp.py student_grasps_v1/02808440/148ec8030e52671d44221bef0fa3c36b/0/
 from pathlib import Path
 import pybullet
 import argparse
@@ -10,7 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data_path", type=str, help="Path to the data")
-parser.add_argument("--mesh_path", type=str, default="data/raw", help="Path to the mesh")
+parser.add_argument("--mesh_path", type=str, default=None, help="Path to the mesh")
 parser.add_argument("--filter", type=str, default="highest", help="Which grasp to visualize: 'highest', 'lowest', or an integer index")
 args = parser.parse_args()
 
@@ -27,8 +26,7 @@ hand_id = pybullet.loadURDF(
 )
 
 # Load object
-scene_id = Path(args.data_path).parts[-1]
-mesh_path = Path(args.mesh_path) / scene_id / "mesh.obj"
+mesh_path = args.mesh_path if args.mesh_path else Path(args.data_path) / "mesh.obj"
 visualShapeId = pybullet.createVisualShape(
                 shapeType=pybullet.GEOM_MESH,
                 fileName=str(mesh_path),
