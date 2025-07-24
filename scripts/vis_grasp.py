@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data_path", type=str, help="Path to the data")
-parser.add_argument("--mesh_path", type=str, default="data/sdf", help="Path to the sdf")
+parser.add_argument("--mesh_path", type=str, default="data/raw", help="Path to the mesh")
 parser.add_argument("--filter", type=str, default="highest", help="Which grasp to visualize: 'highest', 'lowest', or an integer index")
 args = parser.parse_args()
 
@@ -27,7 +27,8 @@ hand_id = pybullet.loadURDF(
 )
 
 # Load object
-mesh_path = args.mesh_path if args.mesh_path else Path(args.data_path) / "mesh.obj"
+scene_id = Path(args.data_path).parts[-1]
+mesh_path = Path(args.mesh_path) / scene_id / "mesh.obj"
 visualShapeId = pybullet.createVisualShape(
                 shapeType=pybullet.GEOM_MESH,
                 fileName=str(mesh_path),
