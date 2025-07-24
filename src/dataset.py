@@ -1,19 +1,42 @@
 import torch
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import Dataset
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import json
 
 
 class GraspDataset(Dataset):
-    def __init__(self, data_path, preload=True):
+    def __init__(self, data_path, split='train', splits_file='data/splits.json', preload=True):
         super().__init__()
         self.preload = preload
-        self.data_path = data_path
+        self.data_path = Path(data_path)
+        self.split = split
+        self.splits_file = Path(splits_file)
 
+        print(f"Loading data for '{self.split}' split from {self.splits_file}")
+
+        if not self.splits_file.exists():
+            raise FileNotFoundError(f"Splits file not found at {self.splits_file}. Please run scripts/create_splits.py first.")
+
+        with open(self.splits_file, 'r') as f:
+            splits = json.load(f)
+        
+        if self.split not in splits:
+            raise ValueError(f"Split '{self.split}' not found in splits file. Available splits: {list(splits.keys())}")
+        
+        scene_ids = splits[self.split]
+        
         print("Collecting data paths...")
-        self.data_files = sorted([dir / 'scene.npz' for dir in data_path.iterdir() if dir.is_dir() and (dir / 'scene.npz').exists()])
-        print(f"Found {len(self.data_files)} scenes")
+        self.data_files = sorted([self.data_path / scene_id / 'scene.npz' for scene_id in scene_ids])
+        
+        # Check for missing files and filter them out
+        original_len = len(self.data_files)
+        self.data_files = [f for f in self.data_files if f.exists()]
+        if len(self.data_files) != original_len:
+            print(f"Warning: {original_len - len(self.data_files)} scene files not found and were skipped.")
+
+        print(f"Found {len(self.data_files)} scenes for split '{self.split}'")
 
         if self.preload:
             self.sdfs = []
@@ -21,7 +44,7 @@ class GraspDataset(Dataset):
             self.scales = []
             self.grasps = []
             self.scores = []
-            for file in tqdm(self.data_files, desc="Loading scenes"):
+            for file in tqdm(self.data_files, desc=f"Loading scenes for {self.split} split"):
                 with np.load(file) as scene_data:
                     self.sdfs.append(scene_data["sdf"])
                     self.translations.append(scene_data["translation"])
@@ -29,8 +52,22 @@ class GraspDataset(Dataset):
                     self.grasps.append(scene_data["grasps"])
                     self.scores.append(scene_data["scores"])
 
-        # each scene has 480 grasps
-        self.grasp_locations = [(scene_idx, grasp_idx) for scene_idx in range(len(self.data_files)) for grasp_idx in range(480)]
+        # Create a list of (scene_idx, grasp_idx) tuples.
+        # Note: Most scenes have 480 grasps, but some have slightly less.
+        self.grasp_locations = []
+        num_grasps_per_scene = []
+        
+        if self.preload:
+            num_grasps_per_scene = [grasps.shape[0] for grasps in self.grasps]
+        else:
+            print("Scanning scenes to determine number of grasps...")
+            for file in tqdm(self.data_files, desc="Scanning scenes"):
+                with np.load(file, mmap_mode='r') as scene_data:
+                    num_grasps_per_scene.append(scene_data['grasps'].shape[0])
+
+        for scene_idx, num_grasps in enumerate(num_grasps_per_scene):
+            for grasp_idx in range(num_grasps):
+                self.grasp_locations.append((scene_idx, grasp_idx))
 
     def __len__(self):
         return len(self.grasp_locations)
@@ -52,11 +89,6 @@ class GraspDataset(Dataset):
 
         sdf, translation, scale, grasps, scores = self._get_scene_data(scene_idx)
 
-        # Handle IndexError by selecting a random valid grasp
-        num_grasps = grasps.shape[0]
-        if grasp_idx >= num_grasps:
-            grasp_idx = np.random.randint(num_grasps)
-
         grasp = grasps[grasp_idx]
         score = scores[grasp_idx]
 
@@ -69,8 +101,4 @@ class GraspDataset(Dataset):
             "scene_idx": scene_idx,
             "grasp_idx": grasp_idx,
         }
-    
-    def __iter__(self):
-        for idx in range(len(self)):
-            yield self[idx]
                 

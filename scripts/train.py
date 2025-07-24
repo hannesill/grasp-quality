@@ -24,12 +24,12 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--num_samples', type=int, default=None, help='Number of samples to use. Defaults to all.')
-    parser.add_argument('--val_split', type=float, default=0.2, help='Validation data split ratio.')
     parser.add_argument('--base_channels', type=int, default=16, help='Base channels for the CNN')
     parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers in the head')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
+    parser.add_argument('--splits_file', type=str, default='data/splits.json', help='Path to the splits JSON file')
     parser.add_argument('--model_path', type=str, default=None, help='Path to model checkpoint')
     parser.add_argument('--encoder_path', type=str, default=None, help='Path to pretrained encoder checkpoint')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
@@ -69,28 +69,30 @@ def main(args):
 
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
-    dataset = GraspDataset(data_path)
-
-    num_available = len(dataset)
-    print(f"Total samples available: {num_available}")
-
-    num_to_use = num_available if args.num_samples is None else min(args.num_samples, num_available)
-    print(f"Using {num_to_use} samples.")
-
-    # Create indices, shuffle and subsample
-    indices = list(range(num_available))
-    random.shuffle(indices)
-    indices = indices[:num_to_use]
-
-    # Split into train and validation
-    val_size = int(num_to_use * args.val_split)
-    train_size = num_to_use - val_size
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:]
-
-    train_set = Subset(dataset, train_indices)
-    val_set = Subset(dataset, val_indices)
+    
+    # Create datasets for training and validation using the splits file
+    train_set = GraspDataset(data_path, split='train', splits_file=args.splits_file)
+    val_set = GraspDataset(data_path, split='val', splits_file=args.splits_file)
+    
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
+
+    # Sub-sample if required
+    if args.num_samples is not None:
+        total_in_split = len(train_set) + len(val_set)
+        train_ratio = len(train_set) / total_in_split
+
+        num_train_samples = int(args.num_samples * train_ratio)
+        num_val_samples = args.num_samples - num_train_samples
+        
+        train_indices = list(range(len(train_set)))
+        random.shuffle(train_indices)
+        train_set = Subset(train_set, train_indices[:num_train_samples])
+
+        val_indices = list(range(len(val_set)))
+        random.shuffle(val_indices)
+        val_set = Subset(val_set, val_indices[:num_val_samples])
+        
+        print(f"Sub-sampling to {len(train_set)} train samples and {len(val_set)} validation samples.")
 
     # Create DataLoaders
     pin_memory = torch.cuda.is_available()

@@ -2,7 +2,8 @@
 .DS_Store
 
 # Data
-/data
+data/*
+!data/splits.json
 
 # Python
 __pycache__
