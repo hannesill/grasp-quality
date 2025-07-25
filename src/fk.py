@@ -9,10 +9,23 @@ class DLRHandFK:
             self.chain = pk.build_chain_from_urdf(f.read()).to(device=self.device, dtype=self.dtype)
         
         self.control_point_links = [
+            # Finger tips
             'forefinger_distal_link', 'middlefinger_distal_link', 
             'ringfinger_distal_link', 'thumb_distal_link',
+            # Middle links
+            'forefinger_middle_link', 'middlefinger_middle_link',
+            'ringfinger_middle_link', 'thumb_middle_link',
+            # Knuckles
             'forefinger_knuckle_link', 'middlefinger_knuckle_link',
-            'ringfinger_knuckle_link', 'thumb_knuckle_link'
+            'ringfinger_knuckle_link', 'thumb_knuckle_link',
+            # Proximal links
+            'forefinger_proximal_link', 'middlefinger_proximal_link',
+            'ringfinger_proximal_link', 'thumb_proximal_link',
+            # Base links
+            'forefinger_base_link', 'middlefinger_base_link',
+            'ringfinger_base_link', 'thumb_base_link',
+            # Palm
+            'hand_base'
         ]
 
     def forward(self, grasp_config):
