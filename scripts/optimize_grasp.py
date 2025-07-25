@@ -18,7 +18,7 @@ from src.model_nflow import create_nflow_model
 from src.fk import DLRHandFK
 
 class GraspOptimizer:
-    def __init__(self, model_path, model_config, nflow_model_path, nflow_model_config, urdf_path, device='cuda'):
+    def __init__(self, gq_model_path, gq_model_config, nflow_model_path, nflow_model_config, urdf_path, device='cuda'):
         """
         Initialize the grasp optimizer with a pre-trained model.
         
@@ -32,10 +32,10 @@ class GraspOptimizer:
         print(f"Using device: {self.device}")
         
         # Load the GQ model
-        weights = torch.load(model_path, map_location=self.device)
+        weights = torch.load(gq_model_path, map_location=self.device)
         # weights = {k.replace('_orig_mod.', ''): v for k, v in weights.items()}
         # torch.save(weights, model_path)
-        self.gq_model = GQEstimator(**model_config)
+        self.gq_model = GQEstimator(**gq_model_config)
         self.gq_model.load_state_dict(weights)
         self.gq_model.to(self.device)
         self.gq_model.eval()
@@ -171,7 +171,7 @@ class GraspOptimizer:
             fk_loss = self.compute_fk_loss(grasp_config, sdf, scale, translation)
             
             loss = (
-                - quality_score 
+                # - quality_score 
                 - log_prob_regularization_strength * log_prob 
                 + fk_regularization_strength * fk_loss
             )
