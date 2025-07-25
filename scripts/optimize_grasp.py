@@ -1,5 +1,6 @@
 import argparse
 import torch
+import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -14,15 +15,17 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.dataset import GraspDataset
 from src.model import GQEstimator
 from src.model_nflow import create_nflow_model
+from src.fk import DLRHandFK
 
 class GraspOptimizer:
-    def __init__(self, model_path, model_config, nflow_model_path, nflow_model_config, device='cuda'):
+    def __init__(self, model_path, model_config, nflow_model_path, nflow_model_config, urdf_path, device='cuda'):
         """
         Initialize the grasp optimizer with a pre-trained model.
         
         Args:
             model_path: Path to the trained model weights
             nflow_model_path: Path to the trained nflow model weights
+            urdf_path: Path to the URDF file for the hand
             device: Device to run optimization on ('cuda' or 'cpu')
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -40,7 +43,7 @@ class GraspOptimizer:
         # Ensure gradients are not computed for model parameters
         for param in self.model.parameters():
             param.requires_grad = False
-            
+        
         print("GQ Model loaded successfully")
         
         # Load the nflow model
@@ -54,7 +57,12 @@ class GraspOptimizer:
             param.requires_grad = False
         
         print("NFlow Model loaded successfully")
-    
+        
+        # Initialize forward kinematics
+        self.fk = DLRHandFK(urdf_path, device=self.device)
+
+        print("Forward kinematics initialized successfully")
+
     def verify_grasp_gradients(self, sdf, grasp_config):
         """
         Verify that gradients are being computed correctly for grasp optimization.
@@ -145,9 +153,38 @@ class GraspOptimizer:
         
         return quality.squeeze()
     
-    def optimize_grasp(self, sdf, initial_grasp=None, learning_rate=0.01, 
+    def compute_fk_loss(self, grasp_config, sdf, scale, translation):
+        """
+        Computes a regularization loss based on hand-object interaction.
+        - Penalizes collisions (control points inside the object).
+        - Encourages fingertips to be close to the object surface.
+        """
+        # Create a new tensor for FK with the grasp in the world frame
+        # to avoid in-place modification of the input tensor.
+        grasp_config_world = grasp_config.clone()
+        grasp_config_world[:3] = grasp_config[:3] / scale + translation
+        control_points = self.fk.forward(grasp_config_world) # (N, 3) tensor in the world frame
+        points_normalized = (control_points - translation) / scale # normalize to [-1, 1]
+        points_for_sampling = points_normalized.view(1, -1, 1, 1, 3)
+
+        sampled_sdf_values = F.grid_sample(
+            sdf.unsqueeze(0).unsqueeze(0), 
+            points_for_sampling,
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=True
+        )
+        sampled_sdf_values = sampled_sdf_values.squeeze()
+        fingertip_sdf_values = sampled_sdf_values[:4]
+
+        contact_loss = torch.relu(fingertip_sdf_values).mean() # encourage fingertips to be on the surface (SDF=0)
+        collision_loss = torch.relu(-sampled_sdf_values).mean() # penalize all points for being inside the object (SDF<0)
+
+        return collision_loss + contact_loss
+
+    def optimize_grasp(self, sdf, scale, translation, initial_grasp=None, learning_rate=0.01, 
                       max_iterations=100, tolerance=1e-6, verbose=True,
-                      regularization_strength=1e-4):
+                      log_prob_regularization_strength=1e-4, fk_regularization_strength=1.0):
         """
         Optimize grasp configuration to maximize predicted grasp quality score.
         
@@ -158,7 +195,8 @@ class GraspOptimizer:
             max_iterations: Maximum number of optimization iterations
             tolerance: Convergence tolerance for loss change
             verbose: Whether to print optimization progress
-            regularization_strength: Strength of KDE-based regularization
+            log_prob_regularization_strength: Strength of distribution-based regularization
+            fk_regularization_strength: Strength of hand-object interaction regularization
             
         Returns:
             dict: Optimization results containing final grasp, loss history, etc.
@@ -181,6 +219,8 @@ class GraspOptimizer:
         
         # Track optimization history
         quality_history = []
+        log_prob_history = []
+        fk_loss_history = []
         grasp_history = []
         
         if verbose:
@@ -198,7 +238,7 @@ class GraspOptimizer:
             if not grad_check['gradient_flow_correct']:
                 raise RuntimeError("Gradient computation is not set up correctly!")
         
-        prev_quality = float('-inf')  # For maximization, start with negative infinity
+        prev_quality = float('-inf')
         
         # Optimization loop
         for iteration in tqdm(range(max_iterations)):
@@ -206,13 +246,21 @@ class GraspOptimizer:
             quality_score = self.predict_grasp_quality(sdf_features, grasp_config).squeeze()
             
             log_prob = self.nflow_model.log_prob(grasp_config.unsqueeze(0)).squeeze()
-            loss = -quality_score - regularization_strength * log_prob
+            fk_loss = self.compute_fk_loss(grasp_config, sdf, scale, translation)
+            
+            loss = (
+                - quality_score 
+                - log_prob_regularization_strength * log_prob 
+                + fk_regularization_strength * fk_loss
+            )
 
             loss.backward()
             optimizer.step()
             quality_history.append(quality_score.item())
+            log_prob_history.append(log_prob_regularization_strength * log_prob.item())
+            fk_loss_history.append(fk_regularization_strength * fk_loss.item())
             grasp_history.append(grasp_config.detach().clone().cpu())
-            
+
             # Check for convergence
             current_quality = quality_score.item()
             if abs(prev_quality - current_quality) < tolerance:
@@ -232,6 +280,8 @@ class GraspOptimizer:
             'optimized_grasp': grasp_config.detach().cpu(),
             'initial_grasp': grasp_history[0],
             'quality_history': quality_history,
+            'log_prob_history': log_prob_history,
+            'fk_loss_history': fk_loss_history,
             'grasp_history': grasp_history,
             'final_quality': quality_history[-1],
             'initial_quality': quality_history[0],
@@ -240,7 +290,7 @@ class GraspOptimizer:
             'iterations': len(quality_history)
         }
     
-    def batch_optimize(self, sdf, num_trials=5, **kwargs):
+    def batch_optimize(self, sdf, scale, translation, num_trials=5, **kwargs):
         """
         Run multiple optimization trials and return the best result.
         
@@ -259,7 +309,7 @@ class GraspOptimizer:
         
         for trial in range(num_trials):
             print(f"\n--- Trial {trial+1}/{num_trials} ---")
-            result = self.optimize_grasp(sdf, **kwargs)
+            result = self.optimize_grasp(sdf, scale, translation, **kwargs)
             
             if result['final_quality'] > best_quality:
                 best_quality = result['final_quality']
@@ -282,9 +332,12 @@ class GraspOptimizer:
         # Plot loss history
         plt.subplot(1, 2, 1)
         plt.plot(result['quality_history'])
+        plt.plot(result['log_prob_history'], label='Log Probability')
+        plt.plot(result['fk_loss_history'], label='FK Loss')
         plt.title('Grasp Quality Optimization')
         plt.xlabel('Iteration')
         plt.ylabel('Grasp Quality Score')
+        plt.legend()
         plt.grid(True)
         
         # Plot grasp configuration evolution (first few dimensions)
@@ -319,7 +372,8 @@ def parse_args():
     parser.add_argument('--max_iter', type=int, default=100, help='Maximum optimization iterations')
     parser.add_argument('--num_trials', type=int, default=5, help='Number of random initialization trials')
     parser.add_argument('--tolerance', type=float, default=1e-6, help='Convergence tolerance')
-    parser.add_argument('--regularization_strength', type=float, default=1e-4, help='Strength of log-probability regularization')
+    parser.add_argument('--log_prob_regularization_strength', type=float, default=0.8, help='Strength of distribution-based regularization')
+    parser.add_argument('--fk_regularization_strength', type=float, default=1.0, help='Strength of hand-object interaction regularization')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on (cuda/cpu)')
     parser.add_argument('--save_plot', type=str, default=None, help='Path to save visualization plot')
     parser.add_argument('--save_path', type=str, default='data/output', help='Path to save optimized grasps')
@@ -337,7 +391,14 @@ def main():
     nflow_model_config.update(args.nflow_model_config)
     
     # Initialize optimizer
-    optimizer = GraspOptimizer(args.model_path, model_config, args.nflow_model_path, nflow_model_config, device=args.device)
+    optimizer = GraspOptimizer(
+        args.model_path, 
+        model_config, 
+        args.nflow_model_path, 
+        nflow_model_config, 
+        'urdfs/dlr2.urdf', 
+        device=args.device
+    )
     
     # Load test data
     data_path = Path(args.data_path)
@@ -350,22 +411,25 @@ def main():
     # Get a test scene
     scene = dataset[args.scene_idx]
     sdf = scene['sdf'].to(optimizer.device)
+    scale = scene['scale']
+    translation = scene['translation']
     
     print(f"Optimizing grasp for scene {args.scene_idx}")
     print(f"SDF shape: {sdf.shape}")
     
     result = optimizer.batch_optimize(
-        sdf, 
+        sdf,
+        scale,
+        translation,
         num_trials=args.num_trials,
         learning_rate=args.lr,
         max_iterations=args.max_iter,
         tolerance=args.tolerance,
         verbose=args.verbose,
-        regularization_strength=args.regularization_strength,
+        log_prob_regularization_strength=args.log_prob_regularization_strength,
+        fk_regularization_strength=args.fk_regularization_strength,
     )
 
-    scale = scene['scale']
-    translation = scene['translation']
     result['optimized_grasp'][:3] = result['optimized_grasp'][:3] / scale + translation
     
     print(f"\nOptimization Summary:")

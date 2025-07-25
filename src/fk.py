@@ -1,0 +1,71 @@
+import torch
+import pytorch_kinematics as pk
+
+class DLRHandFK:
+    def __init__(self, urdf_path, device='cpu', dtype=torch.float32):
+        self.device = torch.device(device)
+        self.dtype = dtype
+        with open(urdf_path, 'rb') as f:
+            self.chain = pk.build_chain_from_urdf(f.read()).to(device=self.device, dtype=self.dtype)
+        
+        self.control_point_links = [
+            'forefinger_distal_link', 'middlefinger_distal_link', 
+            'ringfinger_distal_link', 'thumb_distal_link',
+            'forefinger_knuckle_link', 'middlefinger_knuckle_link',
+            'ringfinger_knuckle_link', 'thumb_knuckle_link'
+        ]
+
+    def forward(self, grasp_config):
+        """
+        Calculates the world coordinates of the control points for a given grasp configuration.
+        Args:
+            grasp_config: A (B, 19) or (19,) tensor with hand pose and joint angles.
+        Returns:
+            A (B, N, 3) tensor of control point coordinates in the world frame, 
+            where N is the number of control points.
+        """
+        single_grasp = len(grasp_config.shape) == 1
+        if single_grasp:
+            grasp_config = grasp_config.unsqueeze(0)
+        
+        grasp_config = grasp_config.to(device=self.device, dtype=self.dtype)
+        batch_size = grasp_config.shape[0]
+
+        # Convert hand pose to transformation (3x3 rotation matrix + 3D translation)
+        pos = grasp_config[:, :3]
+        rot = grasp_config[:, 3:7] # xyzw quaternion format
+        rot = rot / torch.norm(rot, dim=1, keepdim=True)
+        q_wxyz = torch.cat([rot[:, 3].unsqueeze(1), rot[:, :3]], dim=1) # pytorch-kinematics uses wxyz quaternion format
+        matrix = pk.transforms.quaternion_to_matrix(q_wxyz)
+        base_transform = pk.transforms.Transform3d(rot=matrix, pos=pos, device=self.device, dtype=self.dtype)
+        
+        # Get joint angles
+        joint_angles = grasp_config[:, 7:]
+        active_joints = [joint for joint in self.chain.get_joints() if joint.joint_type != 'fixed']
+        joint_dict = {}
+        for i, joint in enumerate(active_joints):
+            if i < joint_angles.shape[1]:
+                joint_dict[joint.name] = joint_angles[:, i]
+            else:
+                joint_dict[joint.name] = torch.zeros(batch_size, device=self.device, dtype=self.dtype)
+
+        # Get transformations for all links (in the hand's base frame)
+        transforms = self.chain.forward_kinematics(joint_dict)
+
+        # Get the world coordinates of the control points (in the hand's base frame)
+        world_coords = []
+        for link_name in self.control_point_links:
+            link_matrix = transforms[link_name].get_matrix() # get transformation matrix for the link (3x3)
+            origin = link_matrix[:, :3, 3]
+            world_coords.append(origin)
+            
+        # Stack into a (B, N, 3) tensor. These are in the hand's base frame.
+        coords_tensor = torch.stack(world_coords, dim=1)
+
+        # Transform points to world frame
+        coords_tensor_world = base_transform.transform_points(coords_tensor)
+
+        if single_grasp:
+            return coords_tensor_world.squeeze(0)
+            
+        return coords_tensor_world 
