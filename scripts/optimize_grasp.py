@@ -177,8 +177,8 @@ class GraspOptimizer:
         sampled_sdf_values = sampled_sdf_values.squeeze()
         fingertip_sdf_values = sampled_sdf_values[:4]
 
-        contact_loss = torch.relu(fingertip_sdf_values).mean() # encourage fingertips to be on the surface (SDF=0)
-        collision_loss = torch.relu(-sampled_sdf_values).mean() # penalize all points for being inside the object (SDF<0)
+        contact_loss = torch.square(torch.relu(fingertip_sdf_values)).mean() # encourage fingertips to be on the surface (SDF=0)
+        collision_loss = torch.square(torch.relu(-sampled_sdf_values)).mean() # penalize all points for being inside the object (SDF<0)
 
         return collision_loss + contact_loss
 
@@ -256,10 +256,10 @@ class GraspOptimizer:
 
             loss.backward()
             optimizer.step()
-            quality_history.append(quality_score.item())
-            log_prob_history.append(log_prob_regularization_strength * log_prob.item())
-            fk_loss_history.append(fk_regularization_strength * fk_loss.item())
-            grasp_history.append(grasp_config.detach().clone().cpu())
+            quality_history.append(quality_score.clone().detach().cpu().item())
+            log_prob_history.append(log_prob_regularization_strength * log_prob.clone().detach().cpu().item())
+            fk_loss_history.append(fk_regularization_strength * fk_loss.clone().detach().cpu().item())
+            grasp_history.append(grasp_config.clone().detach().cpu())
 
             # Check for convergence
             current_quality = quality_score.item()
@@ -292,7 +292,7 @@ class GraspOptimizer:
     
     def batch_optimize(self, sdf, scale, translation, num_trials=5, **kwargs):
         """
-        Run multiple optimization trials and return the best result.
+        Run multiple optimization trials and return all results, sorted by final quality.
         
         Args:
             sdf: Object SDF tensor
@@ -300,24 +300,25 @@ class GraspOptimizer:
             **kwargs: Additional arguments passed to optimize_grasp
             
         Returns:
-            dict: Best optimization result among all trials
+            list: A list of optimization result dictionaries, sorted by final_quality.
         """
-        best_result = None
-        best_quality = float('-inf')
+        all_results = []
         
         print(f"Running {num_trials} optimization trials...")
         
         for trial in range(num_trials):
             print(f"\n--- Trial {trial+1}/{num_trials} ---")
             result = self.optimize_grasp(sdf, scale, translation, **kwargs)
-            
-            if result['final_quality'] > best_quality:
-                best_quality = result['final_quality']
-                best_result = result
-                best_result['trial'] = trial + 1
+            result['trial'] = trial + 1
+            all_results.append(result)
+
+        # Sort results by final quality in descending order
+        all_results.sort(key=lambda r: r['final_quality'], reverse=True)
+
+        if all_results:
+            print(f"\nBest result from trial {all_results[0]['trial']} with quality: {all_results[0]['final_quality']:.6f}")
         
-        print(f"\nBest result from trial {best_result['trial']} with quality: {best_quality:.6f}")
-        return best_result
+        return all_results
     
     def visualize_optimization(self, result, save_path=None):
         """
@@ -331,8 +332,8 @@ class GraspOptimizer:
         
         # Plot loss history
         plt.subplot(1, 2, 1)
-        plt.plot(result['quality_history'])
-        plt.plot(result['log_prob_history'], label='Log Probability')
+        # plt.plot(result['quality_history'])
+        # plt.plot(result['log_prob_history'], label='Log Probability')
         plt.plot(result['fk_loss_history'], label='FK Loss')
         plt.title('Grasp Quality Optimization')
         plt.xlabel('Iteration')
@@ -417,7 +418,7 @@ def main():
     print(f"Optimizing grasp for scene {args.scene_idx}")
     print(f"SDF shape: {sdf.shape}")
     
-    result = optimizer.batch_optimize(
+    results = optimizer.batch_optimize(
         sdf,
         scale,
         translation,
@@ -430,17 +431,21 @@ def main():
         fk_regularization_strength=args.fk_regularization_strength,
     )
 
-    result['optimized_grasp'][:3] = result['optimized_grasp'][:3] / scale + translation
+    if not results:
+        print("Optimization did not produce any results.")
+        return
+
+    best_result = results[0]
     
-    print(f"\nOptimization Summary:")
-    print(f"Initial quality: {result['initial_quality']:.6f}")
-    print(f"Final quality: {result['final_quality']:.6f}")
-    print(f"Improvement: {result['improvement']:.6f}")
-    print(f"Converged: {result['converged']}")
-    print(f"Iterations: {result['iterations']}")
+    print(f"\nOptimization Summary (Best Trial):")
+    print(f"Initial quality: {best_result['initial_quality']:.6f}")
+    print(f"Final quality: {best_result['final_quality']:.6f}")
+    print(f"Improvement: {best_result['improvement']:.6f}")
+    print(f"Converged: {best_result['converged']}")
+    print(f"Iterations: {best_result['iterations']}")
     
     # Visualize results
-    optimizer.visualize_optimization(result, save_path=args.save_plot)
+    optimizer.visualize_optimization(best_result, save_path=args.save_plot)
 
     # Save the optimized grasp configuration
     scene_name = Path(dataset.data_files[args.scene_idx]).parent.name
@@ -450,7 +455,7 @@ def main():
     output_path = output_dir / scene_name
     output_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nSaving optimized grasp to {output_path}")
+    print(f"\nSaving optimized grasps to {output_path}")
 
     # Copy mesh.obj
     source_mesh_path = raw_path / 'mesh.obj'
@@ -460,18 +465,37 @@ def main():
         print(f"Warning: mesh.obj not found at {source_mesh_path}")
 
     # Save grasp and score
-    optimized_grasp = result['optimized_grasp'].numpy()
-    final_quality = result['final_quality']
+    all_grasps_to_save = []
+    all_scores_to_save = []
+    
+    num_steps_to_save = 10
+    
+    for result in results:
+        grasp_history = result['grasp_history']
+        quality_history = result['quality_history']
+    
+        num_iterations = len(grasp_history)
+    
+        if num_iterations > 1:
+            indices = np.linspace(0, num_iterations - 1, num_steps_to_save, dtype=int)
+        else:
+            indices = np.array([0]) if num_iterations > 0 else np.array([])
+
+        for i in indices:
+            grasp = grasp_history[i].clone()
+            grasp[:3] = grasp[:3] / scale + translation
+            all_grasps_to_save.append(grasp.numpy())
+            all_scores_to_save.append(quality_history[i])
     
     # Save in the format expected by vis_grasp.py (as arrays)
-    grasps_to_save = np.array([optimized_grasp])
-    scores_to_save = np.array([final_quality])
+    grasps_to_save = np.array(all_grasps_to_save)
+    scores_to_save = np.array(all_scores_to_save)
     
     npz_path = output_path / 'recording.npz'
     np.savez(npz_path, grasps=grasps_to_save, scores=scores_to_save)
     
-    print(f"Saved recording.npz with 1 grasp.")
-    print(f"To visualize, run: python3 vis_grasp.py {output_path}")
+    print(f"Saved recording.npz with {len(grasps_to_save)} grasp(s) from {len(results)} trials.")
+    print(f"To visualize, run: python3 scripts/vis_grasp.py {output_path}")
 
 
 if __name__ == "__main__":
