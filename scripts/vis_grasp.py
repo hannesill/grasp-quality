@@ -107,25 +107,33 @@ def set_grasp(grasp_data):
         if j in [3, 9, 15, 21]:
             pybullet.resetJointState(hand_id, jointIndex=j + 1, targetValue=grasp_data[7 + k], targetVelocity=0)
 
-if len(indices_to_show) > 1:
-    last_update = time.time()
-    current_index = 0
-    while pybullet.isConnected():
-        pybullet.stepSimulation()
-        
-        if time.time() - last_update >= args.delay:
-            index = indices_to_show[current_index]
-            grasp = data["grasps"][index] 
-            set_grasp(grasp)
-            print(f"Score {data['scores'][index]}")
+# Simulation loop
+try:
+    if len(indices_to_show) > 1:
+        last_update = time.time()
+        current_index = 0
+        while pybullet.isConnected():
+            pybullet.stepSimulation()
             
-            current_index = (current_index + 1) % len(indices_to_show)
-            last_update = time.time()
-else:
-    grasp_index = indices_to_show[0]
-    grasp = data["grasps"][grasp_index]
-    set_grasp(grasp)
-    print(f"Score {data['scores'][grasp_index]}")
+            if time.time() - last_update >= args.delay:
+                index = indices_to_show[current_index]
+                grasp = data["grasps"][index] 
+                set_grasp(grasp)
+                print(f"Trial {index} of {len(indices_to_show)}, score {data['scores'][index]}")
+                
+                current_index = (current_index + 1) % len(indices_to_show)
+                last_update = time.time()
+    else:
+        grasp_index = indices_to_show[0]
+        grasp = data["grasps"][grasp_index]
+        set_grasp(grasp)
+        print(f"Score {data['scores'][grasp_index]}")
 
-    while pybullet.isConnected():
-        pybullet.stepSimulation()
+        while pybullet.isConnected():
+            pybullet.stepSimulation()
+except KeyboardInterrupt:
+    pybullet.disconnect()
+    sys.exit(0)
+finally:
+    if pybullet.isConnected():
+        pybullet.disconnect()
