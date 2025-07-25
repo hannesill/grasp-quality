@@ -35,13 +35,13 @@ class GraspOptimizer:
         weights = torch.load(model_path, map_location=self.device)
         # weights = {k.replace('_orig_mod.', ''): v for k, v in weights.items()}
         # torch.save(weights, model_path)
-        self.model = GQEstimator(**model_config)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device)
-        self.model.eval()
+        self.gq_model = GQEstimator(**model_config)
+        self.gq_model.load_state_dict(weights)
+        self.gq_model.to(self.device)
+        self.gq_model.eval()
         
         # Ensure gradients are not computed for model parameters
-        for param in self.model.parameters():
+        for param in self.gq_model.parameters():
             param.requires_grad = False
         
         print("GQ Model loaded successfully")
@@ -62,96 +62,32 @@ class GraspOptimizer:
         self.fk = DLRHandFK(urdf_path, device=self.device)
 
         print("Forward kinematics initialized successfully")
-
-    def verify_grasp_gradients(self, sdf, grasp_config):
+    
+    def sample_grasp(self, method='nflow'):
         """
-        Verify that gradients are being computed correctly for grasp optimization.
+        Sample a grasp configuration.
         
         Args:
-            sdf: Object SDF tensor
-            grasp_config: Grasp configuration with requires_grad=True
-            
-        Returns:
-            dict: Gradient verification results
-        """
-        # Ensure grasp config has gradients enabled
-        if not grasp_config.requires_grad:
-            raise ValueError("grasp_config must have requires_grad=True for verification")
-        
-        # Clear any existing gradients
-        if grasp_config.grad is not None:
-            grasp_config.grad.zero_()
-        
-        quality = self.predict_grasp_quality(sdf, grasp_config)
-        quality.backward()
-        
-        has_grad = grasp_config.grad is not None
-        grad_norm = grasp_config.grad.norm().item() if has_grad else 0.0
-        
-        # Check model parameters don't have gradients
-        model_grads = [p.grad for p in self.model.parameters() if p.grad is not None]
-        
-        results = {
-            'grasp_has_gradients': has_grad,
-            'grasp_grad_norm': grad_norm,
-            'model_params_with_gradients': len(model_grads),
-            'gradient_flow_correct': has_grad and len(model_grads) == 0
-        }
-        
-        return results
-    
-    def sample_random_grasp(self):
-        """
-        Sample a random grasp configuration.
-        For DLR Hand II: 19 dimensions (7 hand pose + 12 finger joints)
-        
-        Returns:
-            torch.Tensor: Random grasp configuration of shape (19,)
-        """
-        # Hand pose (7 dimensions): position (3) + quaternion (4)
-        # Position: sample around object center
-        hand_pos = torch.randn(3) * 0.1  # Small random offset from center
-        
-        # Quaternion: sample random orientation (normalized)
-        quaternion = torch.randn(4)
-        quaternion = quaternion / torch.norm(quaternion)  # Normalize to unit quaternion
-        
-        # Finger joints (12 dimensions): sample within reasonable joint limits
-        # Assuming joint limits are roughly [0, π] for finger joints
-        finger_joints = torch.rand(12) * np.pi
-        
-        grasp_config = torch.cat([hand_pos, quaternion, finger_joints])
-        return grasp_config.to(self.device)
-
-    def sample_grasp_from_nflow(self):
-        """
-        Sample a grasp configuration from the trained normalizing flow model.
+            method (str): 'nflow' to sample from the normalizing flow model,
+                          'random' to sample a random grasp configuration.
         
         Returns:
             torch.Tensor: Sampled grasp configuration of shape (19,)
         """
-        with torch.no_grad():
-            grasp_config = self.nflow_model.sample(1).squeeze(0)
-        
-        return grasp_config.to(self.device)
-    
-    def predict_grasp_quality(self, sdf_features, grasp_config):
-        """
-        Predict grasp quality for given SDF and grasp configuration.
-        
-        Args:
-            sdf: Tensor of shape (48, 48, 48)
-            grasp_config: Tensor of shape (19,)
+        if method == 'nflow':
+            with torch.no_grad():
+                grasp_config = self.nflow_model.sample(1).squeeze(0)
+        elif method == 'random':
+            hand_pos = torch.randn(3) * 0.1 # hand position (x, y, z)
+            quaternion = torch.randn(4) # hand orientation (qx, qy, qz, qw)
+            quaternion = quaternion / torch.norm(quaternion)
+            finger_joints = torch.rand(12) * np.pi # 4 x 3 finger joint angles (radians)
             
-        Returns:
-            torch.Tensor: Predicted grasp quality score
-        """
-        # Concatenate SDF features with grasp configuration
-        # Only grasp_config should have gradients enabled
-        combined_features = torch.cat([sdf_features, grasp_config.unsqueeze(0)], dim=1)
-        quality = self.model(combined_features)
-        
-        return quality.squeeze()
+            grasp_config = torch.cat([hand_pos, quaternion, finger_joints])
+        else:
+            raise ValueError(f"Unknown grasp sampling method: {method}")
+            
+        return grasp_config.to(self.device)
     
     def compute_fk_loss(self, grasp_config, sdf, scale, translation):
         """
@@ -183,8 +119,9 @@ class GraspOptimizer:
         return collision_loss + contact_loss
 
     def optimize_grasp(self, sdf, scale, translation, initial_grasp=None, learning_rate=0.01, 
-                      max_iterations=100, tolerance=1e-6, verbose=True,
-                      log_prob_regularization_strength=1e-4, fk_regularization_strength=1.0):
+                      max_iterations=100, tolerance=1e-6,
+                      log_prob_regularization_strength=1e-4, fk_regularization_strength=1.0,
+                      sampling_method='nflow'):
         """
         Optimize grasp configuration to maximize predicted grasp quality score.
         
@@ -194,57 +131,42 @@ class GraspOptimizer:
             learning_rate: Learning rate for gradient descent
             max_iterations: Maximum number of optimization iterations
             tolerance: Convergence tolerance for loss change
-            verbose: Whether to print optimization progress
             log_prob_regularization_strength: Strength of distribution-based regularization
             fk_regularization_strength: Strength of hand-object interaction regularization
+            sampling_method: Method for sampling initial grasp ('nflow' or 'random')
             
         Returns:
             dict: Optimization results containing final grasp, loss history, etc.
         """
-        # Initialize grasp configuration
+        # Sample initial grasp configuration
         if initial_grasp is None:
-            grasp_config = self.sample_grasp_from_nflow()
+            grasp_config = self.sample_grasp(method=sampling_method)
         else:
             grasp_config = initial_grasp.clone().to(self.device)
         
         grasp_config.requires_grad_(True)
+        optimizer = torch.optim.Adam([grasp_config], lr=learning_rate)
 
+        # Precompute SDF features
         sdf = sdf.detach()
         with torch.no_grad():
-            sdf_features = self.model.encode_sdf(sdf.unsqueeze(0))
+            sdf_features = self.gq_model.encode_sdf(sdf.unsqueeze(0))
             sdf_features = sdf_features.detach()
         
-        # Setup optimizer for grasp configuration only
-        optimizer = torch.optim.Adam([grasp_config], lr=learning_rate)
-        
-        # Track optimization history
         quality_history = []
         log_prob_history = []
         fk_loss_history = []
         grasp_history = []
         
-        if verbose:
-            print(f"Starting optimization with {max_iterations} max iterations...")
-            initial_quality = self.predict_grasp_quality(sdf_features, grasp_config).item()
-            print(f"Initial grasp quality: {initial_quality:.6f}")
-            
-            # Verify gradient computation on first iteration
-            print("Verifying gradient computation...")
-            grad_check = self.verify_grasp_gradients(sdf, grasp_config.clone().detach().requires_grad_(True))
-            print(f"✓ Grasp gradients: {grad_check['grasp_has_gradients']}")
-            print(f"✓ Gradient norm: {grad_check['grasp_grad_norm']:.6f}")
-            print(f"✓ Model params with gradients: {grad_check['model_params_with_gradients']}")
-            print(f"✓ Gradient flow correct: {grad_check['gradient_flow_correct']}")
-            if not grad_check['gradient_flow_correct']:
-                raise RuntimeError("Gradient computation is not set up correctly!")
-        
-        prev_quality = float('-inf')
+        prev_loss = float('-inf')
         
         # Optimization loop
-        for iteration in tqdm(range(max_iterations)):
+        pbar = tqdm(range(max_iterations), desc="Optimizing grasp")
+        for step in pbar:
             optimizer.zero_grad()
-            quality_score = self.predict_grasp_quality(sdf_features, grasp_config).squeeze()
-            
+
+            combined_features = torch.cat([sdf_features, grasp_config.unsqueeze(0)], dim=1)
+            quality_score = self.gq_model(combined_features).squeeze()
             log_prob = self.nflow_model.log_prob(grasp_config.unsqueeze(0)).squeeze()
             fk_loss = self.compute_fk_loss(grasp_config, sdf, scale, translation)
             
@@ -256,22 +178,19 @@ class GraspOptimizer:
 
             loss.backward()
             optimizer.step()
+
             quality_history.append(quality_score.clone().detach().cpu().item())
             log_prob_history.append(log_prob_regularization_strength * log_prob.clone().detach().cpu().item())
             fk_loss_history.append(fk_regularization_strength * fk_loss.clone().detach().cpu().item())
             grasp_history.append(grasp_config.clone().detach().cpu())
 
             # Check for convergence
-            current_quality = quality_score.item()
-            if abs(prev_quality - current_quality) < tolerance:
-                if verbose:
-                    print(f"Converged at iteration {iteration+1}")
+            current_loss = loss.item()
+            if abs(prev_loss - current_loss) < tolerance:
                 break
-            
-            prev_quality = current_quality
-            
-            if verbose and (iteration + 1) % 10 == 0:
-                print(f"Iteration {iteration+1}: Quality score = {current_quality:.6f}")
+            prev_loss = current_loss
+
+            pbar.set_postfix(loss=f'{current_loss:.4f}', quality=f'{quality_score.item():.4f}')
         
         print(f"Final grasp quality: {quality_history[-1]:.6f}")
         print(f"Improvement: {quality_history[-1] - quality_history[0]:.6f}")
@@ -286,7 +205,7 @@ class GraspOptimizer:
             'final_quality': quality_history[-1],
             'initial_quality': quality_history[0],
             'improvement': quality_history[-1] - quality_history[0],
-            'converged': abs(prev_quality - quality_score.item()) < tolerance,
+            'converged': abs(prev_loss - current_loss) < tolerance,
             'iterations': len(quality_history)
         }
     
@@ -332,8 +251,8 @@ class GraspOptimizer:
         
         # Plot loss history
         plt.subplot(1, 2, 1)
-        # plt.plot(result['quality_history'])
-        # plt.plot(result['log_prob_history'], label='Log Probability')
+        plt.plot(result['quality_history'], label='Quality Score')
+        plt.plot(result['log_prob_history'], label='Log Probability')
         plt.plot(result['fk_loss_history'], label='FK Loss')
         plt.title('Grasp Quality Optimization')
         plt.xlabel('Iteration')
@@ -363,8 +282,8 @@ class GraspOptimizer:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Optimize grasp configurations using gradient descent")
-    parser.add_argument('--model_path', type=str, required=True, help='Path to trained GQ model weights')
-    parser.add_argument('--model_config', type=json.loads, default={}, help='Config for GQ model')
+    parser.add_argument('--gq_model_path', type=str, required=True, help='Path to trained GQ model weights')
+    parser.add_argument('--gq_model_config', type=json.loads, default={}, help='Config for GQ model')
     parser.add_argument('--nflow_model_path', type=str, required=True, help='Path to trained nflow model weights')
     parser.add_argument('--nflow_model_config', type=json.loads, default={}, help='Config for nflow model. Partial configs will be merged with defaults.')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
@@ -375,26 +294,26 @@ def parse_args():
     parser.add_argument('--tolerance', type=float, default=1e-6, help='Convergence tolerance')
     parser.add_argument('--log_prob_regularization_strength', type=float, default=0.8, help='Strength of distribution-based regularization')
     parser.add_argument('--fk_regularization_strength', type=float, default=1.0, help='Strength of hand-object interaction regularization')
+    parser.add_argument('--sampling_method', type=str, default='nflow', choices=['nflow', 'random'], help='Method for sampling initial grasps')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on (cuda/cpu)')
     parser.add_argument('--save_plot', type=str, default=None, help='Path to save visualization plot')
     parser.add_argument('--save_path', type=str, default='data/output', help='Path to save optimized grasps')
-    parser.add_argument('--verbose', action='store_true', default=False, help='Verbose output')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    model_config = {'input_size': 48, 'base_channels': 8, 'fc_dims': [512, 128, 64]}
-    model_config.update(args.model_config)
+    gq_model_config = {'input_size': 48, 'base_channels': 8, 'fc_dims': [512, 128, 64]}
+    gq_model_config.update(args.gq_model_config)
 
     nflow_model_config = {'input_dim': 19}
     nflow_model_config.update(args.nflow_model_config)
     
     # Initialize optimizer
     optimizer = GraspOptimizer(
-        args.model_path, 
-        model_config, 
+        args.gq_model_path, 
+        gq_model_config, 
         args.nflow_model_path, 
         nflow_model_config, 
         'urdfs/dlr2.urdf', 
@@ -426,9 +345,9 @@ def main():
         learning_rate=args.lr,
         max_iterations=args.max_iter,
         tolerance=args.tolerance,
-        verbose=args.verbose,
         log_prob_regularization_strength=args.log_prob_regularization_strength,
         fk_regularization_strength=args.fk_regularization_strength,
+        sampling_method=args.sampling_method
     )
 
     if not results:
