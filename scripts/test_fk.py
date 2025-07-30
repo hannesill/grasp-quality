@@ -42,9 +42,13 @@ def main():
     )
 
     # Load data
-    dataset = GraspDataset(Path(data_path), split='val', preload=False)
+    dataset = GraspDataset(Path(data_path), split='train', preload=False)
+
+    print(f"Using scene {scene_idx}, stored at {dataset.data_files[scene_idx]}")
     sdf, translation, scale, grasps, scores = dataset._get_scene_data(scene_idx)
     sdf = torch.from_numpy(sdf).float()
+    translation = torch.from_numpy(translation).float()
+    scale = torch.tensor(scale).float()
     
     # Load object mesh
     scene_name = Path(dataset.data_files[scene_idx]).parts[-2]
@@ -58,6 +62,13 @@ def main():
     else:
         print(f"Could not find mesh at {mesh_path}. Object will not be loaded.")
 
+    # Sort grasps by quality score in descending order
+    scores = torch.from_numpy(scores).float()
+    sorted_indices = torch.argsort(scores, descending=True)
+    grasps = grasps[sorted_indices]
+    scores = scores[sorted_indices]
+    
+    print(f"Using grasp {grasp_idx} with quality score {scores[grasp_idx]:.4f}")
     grasp_config_np = grasps[grasp_idx]
     grasp_config = torch.from_numpy(grasp_config_np).float().to(device)
     grasp_config[:3] = grasp_config[:3] / scale + translation
@@ -65,11 +76,12 @@ def main():
     # --- Forward Kinematics ---
     fk_model = DLRHandFK(urdf_path, device=device)
     control_points = fk_model.forward(grasp_config)
+    normalized_control_points = (control_points - translation) / scale
 
     # --- Sampling ---
     sampled_sdf_values = F.grid_sample(
         sdf.unsqueeze(0).unsqueeze(0), 
-        control_points.view(1, -1, 1, 1, 3),
+        normalized_control_points.view(1, -1, 1, 1, 3),
         mode='bilinear',
         padding_mode='border',
         align_corners=True
@@ -79,8 +91,8 @@ def main():
     print("SDF values at fingertips:")
     print(fingertip_sdf_values)
 
-    contact_loss = torch.square(torch.relu(fingertip_sdf_values)).mean()
-    collision_loss = torch.square(torch.relu(-sampled_sdf_values)).mean()
+    contact_loss = torch.square(torch.relu(100 * fingertip_sdf_values)).mean()
+    collision_loss = torch.square(torch.relu(-100 * sampled_sdf_values)).mean()
     print(f"Contact loss: {contact_loss.item()}, Collision loss: {collision_loss.item()}")
 
     # --- Visualization ---
@@ -89,17 +101,14 @@ def main():
     hand_orn = grasp_config[3:7].numpy()
     joint_angles = grasp_config[7:].numpy()
     
-    p.resetBasePositionAndOrientation(hand_id, hand_pos, hand_orn)
+    p.resetBasePositionAndOrientation(bodyUniqueId=hand_id, posObj=hand_pos, ornObj=hand_orn)
 
-    revolute_joints = []
-    for i in range(p.getNumJoints(hand_id)):
-        info = p.getJointInfo(hand_id, i)
-        if info[2] == p.JOINT_REVOLUTE:
-            revolute_joints.append(i)
-    
-    for i, joint_idx in enumerate(revolute_joints):
-        if i < len(joint_angles):
-            p.resetJointState(hand_id, joint_idx, joint_angles[i])
+    # Set joint angles
+    for k, j in enumerate([1,2,3, 7,8,9, 13,14,15, 19,20,21]):
+        p.resetJointState(hand_id, jointIndex=j, targetValue=joint_angles[k], targetVelocity=0)
+        # Set coupled joint
+        if j in [3, 9, 15, 21]:
+            p.resetJointState(hand_id, jointIndex=j + 1, targetValue=joint_angles[k], targetVelocity=0)
 
     # Draw spheres at the control points
     control_points_np = control_points.detach().cpu().numpy()
