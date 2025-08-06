@@ -59,10 +59,16 @@ if __name__ == "__main__":
 
     if args.file:
         filename = args.file
+        if filename.startswith('data/processed'):
+            args.number = filename.split('/')[2]
+            output_dir = os.path.join(args.output, args.number)
+        else:
+            output_dir = args.output + '/' + filename.split('/')[-1].split('.')[0]
     else:
         filename = os.path.join(os.path.dirname(__file__), 'data', 'processed', args.number, 'scene.npz')
+        output_dir = os.path.join(args.output, args.number)
 
-    output_dir = os.path.join(args.output, args.number)
+    
     os.makedirs(output_dir, exist_ok=True)
 
     data = np.load(filename)

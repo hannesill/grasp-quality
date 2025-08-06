@@ -172,7 +172,7 @@ class GraspOptimizer:
             
             loss = (
                 # - quality_score 
-                - log_prob_regularization_strength * log_prob 
+                # - log_prob_regularization_strength * log_prob 
                 + fk_regularization_strength * fk_loss
             )
 
@@ -288,6 +288,7 @@ def parse_args():
     parser.add_argument('--nflow_model_config', type=json.loads, default={}, help='Config for nflow model. Partial configs will be merged with defaults.')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--scene_idx', type=int, default=0, help='Index of scene to optimize for')
+    parser.add_argument('--sdf_file', type=str, default=None, help='Path to a specific SDF file to use instead of the dataset')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for optimization')
     parser.add_argument('--max_iter', type=int, default=100, help='Maximum optimization iterations')
     parser.add_argument('--num_trials', type=int, default=5, help='Number of random initialization trials')
@@ -321,20 +322,28 @@ def main():
     )
     
     # Load test data
-    data_path = Path(args.data_path)
-    dataset = GraspDataset(data_path, preload=False)
-    
-    if args.scene_idx >= len(dataset):
-        print(f"Scene index {args.scene_idx} out of range. Dataset has {len(dataset)} scenes.")
-        return
-    
-    # Get a test scene
-    scene = dataset[args.scene_idx]
-    sdf = scene['sdf'].to(optimizer.device)
-    scale = scene['scale']
-    translation = scene['translation']
-    
-    print(f"Optimizing grasp for scene {args.scene_idx}")
+    if args.sdf_file:
+        data = np.load(args.sdf_file)
+        sdf = torch.from_numpy(data['sdf']).float().to(optimizer.device)
+        scale = 1.0  # Default scale
+        translation = torch.tensor([0.0, 0.0, 0.0])  # Default translation
+        scene_name = Path(args.sdf_file).stem
+        print(f"Loaded SDF from {args.sdf_file}")
+    else:
+        data_path = Path(args.data_path)
+        dataset = GraspDataset(data_path, preload=False)
+        
+        if args.scene_idx >= len(dataset):
+            print(f"Scene index {args.scene_idx} out of range. Dataset has {len(dataset)} scenes.")
+            return
+        
+        # Get a test scene
+        scene = dataset[args.scene_idx]
+        sdf = scene['sdf'].to(optimizer.device)
+        scale = scene['scale']
+        translation = scene['translation']
+        scene_name = Path(dataset.data_files[args.scene_idx]).parent.name
+        print(f"Optimizing grasp for scene {args.scene_idx} from dataset")
     print(f"SDF shape: {sdf.shape}")
     
     results = optimizer.batch_optimize(
@@ -367,21 +376,24 @@ def main():
     optimizer.visualize_optimization(best_result, save_path=args.save_plot)
 
     # Save the optimized grasp configuration
-    scene_name = Path(dataset.data_files[args.scene_idx]).parent.name
-    raw_dir = Path('data/raw')
-    raw_path = raw_dir / scene_name
-    output_dir = Path(args.save_path)
-    output_path = output_dir / scene_name
-    output_path.mkdir(parents=True, exist_ok=True)
+    if not args.sdf_file:
+        raw_dir = Path('data/raw')
+        raw_path = raw_dir / scene_name
+        output_dir = Path(args.save_path)
+        output_path = output_dir / scene_name
+        output_path.mkdir(parents=True, exist_ok=True)
+        # Copy mesh.obj
+        source_mesh_path = raw_path / 'mesh.obj'
+        if source_mesh_path.exists():
+            shutil.copy(source_mesh_path, output_path)
+        else:
+            print(f"Warning: mesh.obj not found at {source_mesh_path}")
+    else:
+        output_dir = Path(args.save_path)
+        output_path = output_dir / scene_name
+        output_path.mkdir(parents=True, exist_ok=True)
 
     print(f"\nSaving optimized grasps to {output_path}")
-
-    # Copy mesh.obj
-    source_mesh_path = raw_path / 'mesh.obj'
-    if source_mesh_path.exists():
-        shutil.copy(source_mesh_path, output_path)
-    else:
-        print(f"Warning: mesh.obj not found at {source_mesh_path}")
 
     # Save grasp and score
     all_grasps_to_save = []
