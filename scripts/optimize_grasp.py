@@ -98,9 +98,9 @@ class GraspOptimizer:
         # Create a new tensor for FK with the grasp in the world frame
         # to avoid in-place modification of the input tensor.
         grasp_config_world = grasp_config.clone()
-        grasp_config_world[:3] = grasp_config[:3] / scale + translation
+        grasp_config_world[:3] = grasp_config_world[:3] / scale + translation
         control_points = self.fk.forward(grasp_config_world) # (N, 3) tensor in the world frame
-        points_normalized = (control_points - translation) / scale # normalize to [-1, 1]
+        points_normalized = (control_points - translation) * scale # normalize to [-1, 1]
         points_for_sampling = points_normalized.view(1, -1, 1, 1, 3)
 
         sampled_sdf_values = F.grid_sample(
@@ -113,8 +113,8 @@ class GraspOptimizer:
         sampled_sdf_values = sampled_sdf_values.squeeze()
         fingertip_sdf_values = sampled_sdf_values[:4]
 
-        contact_loss = torch.square(torch.relu(fingertip_sdf_values)).mean() # encourage fingertips to be on the surface (SDF=0)
-        collision_loss = torch.square(torch.relu(-sampled_sdf_values)).mean() # penalize all points for being inside the object (SDF<0)
+        contact_loss = torch.square(torch.relu(100 * fingertip_sdf_values)).mean() # encourage fingertips to be on the surface (SDF=0)
+        collision_loss = torch.square(torch.relu(-100 * sampled_sdf_values)).mean() # penalize all points for being inside the object (SDF<0)
 
         return collision_loss + contact_loss
 
@@ -171,7 +171,7 @@ class GraspOptimizer:
             fk_loss = self.compute_fk_loss(grasp_config, sdf, scale, translation)
             
             loss = (
-                # - quality_score 
+                - quality_score 
                 - log_prob_regularization_strength * log_prob 
                 + fk_regularization_strength * fk_loss
             )
@@ -386,12 +386,14 @@ def main():
     # Save grasp and score
     all_grasps_to_save = []
     all_scores_to_save = []
+    all_fk_losses_to_save = []
     
     num_steps_to_save = 10
     
     for result in results:
         grasp_history = result['grasp_history']
         quality_history = result['quality_history']
+        fk_loss_history = result['fk_loss_history']
     
         num_iterations = len(grasp_history)
     
@@ -405,13 +407,14 @@ def main():
             grasp[:3] = grasp[:3] / scale + translation
             all_grasps_to_save.append(grasp.numpy())
             all_scores_to_save.append(quality_history[i])
-    
+            all_fk_losses_to_save.append(fk_loss_history[i])
     # Save in the format expected by vis_grasp.py (as arrays)
     grasps_to_save = np.array(all_grasps_to_save)
     scores_to_save = np.array(all_scores_to_save)
+    fk_losses_to_save = np.array(all_fk_losses_to_save)
     
     npz_path = output_path / 'recording.npz'
-    np.savez(npz_path, grasps=grasps_to_save, scores=scores_to_save)
+    np.savez(npz_path, grasps=grasps_to_save, scores=scores_to_save, fk_loss=fk_losses_to_save)
     
     print(f"Saved recording.npz with {len(grasps_to_save)} grasp(s) from {len(results)} trials.")
     print(f"To visualize, run: python3 scripts/vis_grasp.py {output_path}")
