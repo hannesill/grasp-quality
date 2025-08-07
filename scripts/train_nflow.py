@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--project_name', type=str, default='adlr-nflow', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for regularization')
+    parser.add_argument('--no_pose', action='store_true', help='Disregard hand pose (position and rotation)')
     parser.add_argument('--input_dim', type=int, default=19, help='Dimension of the grasp configuration')
     parser.add_argument('--num_flow_layers', type=int, default=5, help='Number of flow layers')
     parser.add_argument('--hidden_features', type=int, default=64, help='Hidden features in the flow transforms')
@@ -87,8 +88,10 @@ def main(args):
         shuffle=False
     )
 
+    input_dim = args.input_dim if not args.no_pose else args.input_dim - 7
+
     model = create_nflow_model(
-        input_dim=args.input_dim,
+        input_dim=input_dim,
         num_layers=args.num_flow_layers,
         hidden_features=args.hidden_features
     ).to(device)
@@ -112,6 +115,8 @@ def main(args):
             optimizer.zero_grad()
             
             grasp_batch = batch['grasp'].to(device)
+            if args.no_pose:
+                grasp_batch = grasp_batch[:, 7:]
             
             loss = -model.log_prob(inputs=grasp_batch).mean()
             
@@ -133,6 +138,8 @@ def main(args):
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
                 grasp_batch = batch['grasp'].to(device)
+                if args.no_pose:
+                    grasp_batch = grasp_batch[:, 7:]
                 loss = -model.log_prob(inputs=grasp_batch).mean()
                 total_val_loss += loss.item()
                 num_steps += 1
