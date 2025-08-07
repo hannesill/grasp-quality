@@ -113,8 +113,8 @@ class GraspOptimizer:
         sampled_sdf_values = sampled_sdf_values.squeeze()
         fingertip_sdf_values = sampled_sdf_values[:4]
 
-        contact_loss = torch.square(torch.relu(100 * fingertip_sdf_values)).mean() # encourage fingertips to be on the surface (SDF=0)
-        collision_loss = torch.square(torch.relu(-100 * sampled_sdf_values)).mean() # penalize all points for being inside the object (SDF<0)
+        contact_loss = torch.square(torch.relu(10 * fingertip_sdf_values)).mean() # encourage fingertips to be on the surface (SDF=0)
+        collision_loss = torch.square(torch.relu(-10 * sampled_sdf_values)).mean() # penalize all points for being inside the object (SDF<0)
 
         return collision_loss + contact_loss
 
