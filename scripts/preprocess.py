@@ -39,7 +39,7 @@ def get_mesh_max_extent(item_dirs: list[Path]) -> float:
 # ───────────────────────────────── SDF ────────────────────────────────────
 def mesh_to_sdf(mesh: trimesh.Trimesh,
                 n: int,
-                fix_mesh: bool = True,
+                fix_mesh: bool = False,
                 global_scale: float = None) -> np.ndarray:
     """Return (n,n,n) float32 SDF in canonical cube [-1,1]^3 using mesh2sdf."""
     mesh_copy = mesh.copy()
@@ -117,8 +117,7 @@ if __name__ == "__main__":
     parser.add_argument('-g', '--grid_res', type=int, default=48, help="Grid resolution for voxelization (default: 48).")
     parser.add_argument('-c', '--cores', type=int, default=24, help="Number of CPU cores for parallel processing (default: 24).")
     parser.add_argument('-l', '--limit', type=int, default=None, help="Maximum number of items to process (default: process all).")
-    parser.add_argument('--fix_mesh', action='store_true', default=True, help="Attempt to fix non-watertight meshes when computing SDF with mesh2sdf (default: True).")
-    parser.add_argument('--no-fix_mesh', dest='fix_mesh', action='store_false', help="Disable fixing meshes for mesh2sdf.")
+    parser.add_argument('--fix_mesh', action='store_true', default=False, help="Attempt to fix non-watertight meshes when computing SDF with mesh2sdf (default: False).")
     parser.add_argument('--mesh_max_extent', type=float, default=None, help="Pre-computed mesh max extent. If provided, skips mesh analysis for scaling.")
     args = parser.parse_args()
 
