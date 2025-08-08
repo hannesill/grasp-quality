@@ -13,7 +13,7 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.dataset import GraspDataset
-from src.model import GQEstimator
+from src.model_h import GQEstimatorH
 from src.model_nflow import create_nflow_model
 from src.fk import DLRHandFK
 
@@ -34,8 +34,8 @@ class GraspOptimizer:
         # Load the GQ model
         weights = torch.load(gq_model_path, map_location=self.device)
         # weights = {k.replace('_orig_mod.', ''): v for k, v in weights.items()}
-        # torch.save(weights, model_path)
-        self.gq_model = GQEstimator(**gq_model_config)
+        # torch.save(weights, gq_model_path)
+        self.gq_model = GQEstimatorH(**gq_model_config)
         self.gq_model.load_state_dict(weights)
         self.gq_model.to(self.device)
         self.gq_model.eval()
@@ -171,7 +171,7 @@ class GraspOptimizer:
             fk_loss = self.compute_fk_loss(grasp_config, sdf, scale, translation)
             
             loss = (
-                - quality_score 
+                - quality_score
                 - log_prob_regularization_strength * log_prob 
                 + fk_regularization_strength * fk_loss
             )
@@ -192,8 +192,7 @@ class GraspOptimizer:
 
             pbar.set_postfix(loss=f'{current_loss:.4f}', quality=f'{quality_score.item():.4f}')
         
-        print(f"Final grasp quality: {quality_history[-1]:.6f}")
-        print(f"Improvement: {quality_history[-1] - quality_history[0]:.6f}")
+        print(f"Final grasp quality: {quality_history[-1]:.6f}, log_prob: {log_prob_history[-1]:.6f}, fk_loss: {fk_loss_history[-1]:.6f}")
         
         return {
             'optimized_grasp': grasp_config.detach().cpu(),
@@ -304,7 +303,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    gq_model_config = {'input_size': 48, 'base_channels': 8, 'fc_dims': [512, 128, 64]}
+    gq_model_config = {'input_size': 48, 'base_channels': 8, 'fc_dims': [256, 128, 64]}
     gq_model_config.update(args.gq_model_config)
 
     nflow_model_config = {'input_dim': 19}
