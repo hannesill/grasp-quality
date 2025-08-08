@@ -119,7 +119,10 @@ try:
                 index = indices_to_show[current_index]
                 grasp = data["grasps"][index] 
                 set_grasp(grasp)
-                print(f"Trial {index} of {len(indices_to_show)}, score {data['scores'][index]}")
+                print_str = f"Trial {index} of {len(indices_to_show)}, score {data['scores'][index]:.5f}"
+                if 'fk_loss' in data:
+                    print_str += f", FK loss {data['fk_loss'][index]:.5f}"
+                print(print_str)
                 
                 current_index = (current_index + 1) % len(indices_to_show)
                 last_update = time.time()
@@ -127,7 +130,10 @@ try:
         grasp_index = indices_to_show[0]
         grasp = data["grasps"][grasp_index]
         set_grasp(grasp)
-        print(f"Score {data['scores'][grasp_index]}")
+        print_str = f"Score {data['scores'][grasp_index]:.5f}"
+        if 'fk_loss' in data:
+            print_str += f", FK loss {data['fk_loss'][grasp_index]:.5f}"
+        print(print_str)
 
         while pybullet.isConnected():
             pybullet.stepSimulation()
