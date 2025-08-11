@@ -7,40 +7,32 @@ from tqdm import tqdm
 import wandb
 import sys
 import os
-import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.dataset import GraspDataset
-from src.model import GQEstimator
-
-# Set seeds for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
+from src.dataset_sdf import SDFDataset
+from src.model import ObjectAutoEncoder
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
+    parser = argparse.ArgumentParser(description="Train Object Autoencoder")
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--num_samples', type=int, default=None, help='Number of samples to use. Defaults to all.')
+    parser.add_argument('--val_split', type=float, default=0.2, help='Validation data split ratio.')
     parser.add_argument('--base_channels', type=int, default=16, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[32, 16], help='Dimensions of FC layers in the head')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
-    parser.add_argument('--splits_file', type=str, default='data/splits.json', help='Path to the splits JSON file')
     parser.add_argument('--model_path', type=str, default=None, help='Path to model checkpoint')
-    parser.add_argument('--encoder_path', type=str, default=None, help='Path to pretrained encoder checkpoint')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
-    parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
+    parser.add_argument('--project_name', type=str, default='adlr-autoencoder', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
     parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
     return parser.parse_args()
 
 class EarlyStopping:
-    def __init__(self, patience=15, min_delta=0.1):
+    def __init__(self, patience=15, min_delta=0.0001):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
@@ -69,30 +61,29 @@ def main(args):
 
     # --- Dataset and Dataloaders ---
     data_path = Path(args.data_path)
-    
-    # Create datasets for training and validation using the splits file
-    train_set = GraspDataset(data_path, split='train', splits_file=args.splits_file)
-    val_set = GraspDataset(data_path, split='val', splits_file=args.splits_file)
-    
+    dataset = SDFDataset(data_path)
+
+    num_available = len(dataset)
+    print(f"Total samples available: {num_available}")
+
+    num_to_use = num_available if args.num_samples is None else min(args.num_samples, num_available)
+    print(f"Using {num_to_use} samples.")
+
+    # Create indices, shuffle and subsample
+    indices = list(range(num_available))
+    random.seed(42)
+    random.shuffle(indices)
+    indices = indices[:num_to_use]
+
+    # Split into train and validation
+    val_size = int(num_to_use * args.val_split)
+    train_size = num_to_use - val_size
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
     print(f"Train dataset size: {len(train_set)}, Validation dataset size: {len(val_set)}")
-
-    # Sub-sample if required
-    if args.num_samples is not None:
-        total_in_split = len(train_set) + len(val_set)
-        train_ratio = len(train_set) / total_in_split
-
-        num_train_samples = int(args.num_samples * train_ratio)
-        num_val_samples = args.num_samples - num_train_samples
-        
-        train_indices = list(range(len(train_set)))
-        random.shuffle(train_indices)
-        train_set = Subset(train_set, train_indices[:num_train_samples])
-
-        val_indices = list(range(len(val_set)))
-        random.shuffle(val_indices)
-        val_set = Subset(val_set, val_indices[:num_val_samples])
-        
-        print(f"Sub-sampling to {len(train_set)} train samples and {len(val_set)} validation samples.")
 
     # Create DataLoaders
     pin_memory = torch.cuda.is_available()
@@ -102,7 +93,7 @@ def main(args):
         num_workers=args.num_workers, 
         pin_memory=pin_memory, 
         persistent_workers=True if args.num_workers > 0 else False,
-        shuffle=True # Important: shuffle for training
+        shuffle=True
     )
     val_loader = DataLoader(
         val_set, 
@@ -110,30 +101,20 @@ def main(args):
         num_workers=args.num_workers, 
         pin_memory=pin_memory, 
         persistent_workers=True if args.num_workers > 0 else False,
-        shuffle=False # No shuffle for validation
+        shuffle=False
     )
 
     # --- Model, Optimizer, Loss ---
-    model = GQEstimator(input_size=48, base_channels=args.base_channels, fc_dims=args.fc_dims).to(device)
-    if args.encoder_path:
-        model.object_encoder.load_state_dict(torch.load(args.encoder_path, weights_only=True))
-        print(f"Loaded encoder from {args.encoder_path}")
-
+    model = ObjectAutoEncoder(input_size=48, base_channels=args.base_channels).to(device)
     if args.model_path:
         model.load_state_dict(torch.load(args.model_path, weights_only=True))
         print(f"Loaded model from {args.model_path}")
-    elif not args.encoder_path:
+    else:
         print("No model path provided, starting from scratch")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = torch.nn.MSELoss()
     
-    # Learning rate scheduler
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #     optimizer, mode='min', factor=0.7, patience=10
-    # )
-    
-    # Early stopping
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
     
     wandb.watch(model, criterion, log="all", log_freq=100)
@@ -143,7 +124,6 @@ def main(args):
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
-        # === EPOCH-LEVEL SDF PREPROCESSING ===
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
         # === TRAINING ===
@@ -155,28 +135,20 @@ def main(args):
         for batch in pbar:
             optimizer.zero_grad()
 
-            # Move batch to device
             sdf_batch = batch['sdf'].to(device)
-            grasp_batch = batch['grasp'].to(device)
-            score_batch = batch['score'].to(device)
-
-            # Encode SDFs and predict scores
-            sdf_features_batch = model.encode_sdf(sdf_batch)
-            flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-            pred_quality = model(flattened_features)
-
-            loss = criterion(pred_quality, score_batch)
+            if len(sdf_batch.shape) == 3: # Add batch dimension if missing
+                sdf_batch = sdf_batch.unsqueeze(0)
+            if len(sdf_batch.shape) == 4: # Add channel dimension if missing
+                sdf_batch = sdf_batch.unsqueeze(1)
+            
+            reconstructed_sdf = model(sdf_batch)
+            loss = criterion(reconstructed_sdf, sdf_batch)
             loss.backward()
-            
-            # Gradient clipping
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
 
             total_train_loss += loss.item()
             num_steps += 1
             
-            # Update progress bar
             running_loss = total_train_loss / num_steps
             pbar.set_postfix(loss=f'{running_loss:.4f}')
 
@@ -189,41 +161,33 @@ def main(args):
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} Validation")
             for batch in pbar_val:
-                # Move batch to device
                 sdf_batch = batch['sdf'].to(device)
-                grasp_batch = batch['grasp'].to(device)
-                score_batch = batch['score'].to(device)
+                if len(sdf_batch.shape) == 3:
+                    sdf_batch = sdf_batch.unsqueeze(0)
+                if len(sdf_batch.shape) == 4:
+                    sdf_batch = sdf_batch.unsqueeze(1)
 
-                # Encode SDFs and predict scores
-                sdf_features_batch = model.encode_sdf(sdf_batch)
-                flattened_features = torch.cat([sdf_features_batch, grasp_batch], dim=1)
-                pred_quality = model(flattened_features)
-
-                loss = criterion(pred_quality, score_batch)
+                reconstructed_sdf = model(sdf_batch)
+                loss = criterion(reconstructed_sdf, sdf_batch)
 
                 total_val_loss += loss.item()
                 num_steps += 1
                 
-                # Update progress bar
                 running_val_loss = total_val_loss / num_steps
                 pbar_val.set_postfix(val_loss=f'{running_val_loss:.4f}')
 
         avg_val_loss = total_val_loss / num_steps
         
-        # Step the scheduler
-        # scheduler.step(avg_val_loss)
-        
-        # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f'Epoch [{epoch+1}/{args.epochs}], LR: {current_lr:.2e}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
         
-        # Save best model
-        if avg_val_loss < best_val_loss and epoch > 10:
+        if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model.pth')
-        
-        # Log to wandb
+            torch.save(model.state_dict(), 'best_autoencoder.pth')
+            # Also save encoder separately
+            torch.save(model.encoder.state_dict(), 'best_encoder.pth')
+
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
@@ -231,19 +195,19 @@ def main(args):
             "learning_rate": current_lr,
         })
         
-        # Early stopping check
         if early_stopping(avg_val_loss):
             print(f"Early stopping triggered at epoch {epoch+1}")
             break
 
     # --- Save Final Model ---
-    model_path = f"{wandb.run.dir}/final_model.pth"
+    model_path = f"{wandb.run.dir}/final_autoencoder.pth"
     torch.save(model.state_dict(), model_path)
+    torch.save(model.encoder.state_dict(), f"{wandb.run.dir}/final_encoder.pth")
     print(f"Final model saved to {model_path}")
-    print(f"Best model saved to best_model.pth")
+    print(f"Best model saved to best_autoencoder.pth")
     
     wandb.finish()
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    main(args) 

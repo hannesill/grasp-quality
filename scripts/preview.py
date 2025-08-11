@@ -6,15 +6,20 @@ import skimage.measure
 import trimesh
 import argparse
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 def visualize_sdf(sdf, output_dir):
     mesh_scale = 0.8
     levels = [-0.02, 0.0, 0.02]
 
     size = sdf.shape[0]
-    print(sdf.max(), sdf.min())
+    sdf_min, sdf_max = sdf.min(), sdf.max()
+    print(sdf_max, sdf_min)
 
     # extract level sets
     for i, level in enumerate(levels):
+        if not (sdf_min < level < sdf_max):
+            continue
         vtx, faces, _, _ = skimage.measure.marching_cubes(sdf, level)
 
         vtx = vtx * (mesh_scale * 2.0 / size) - 1.0
@@ -54,10 +59,16 @@ if __name__ == "__main__":
 
     if args.file:
         filename = args.file
+        if filename.startswith('data/processed'):
+            args.number = filename.split('/')[2]
+            output_dir = os.path.join(args.output, args.number)
+        else:
+            output_dir = args.output + '/' + filename.split('/')[-1].split('.')[0]
     else:
         filename = os.path.join(os.path.dirname(__file__), 'data', 'processed', args.number, 'scene.npz')
+        output_dir = os.path.join(args.output, args.number)
 
-    output_dir = os.path.join(args.output, args.number)
+    
     os.makedirs(output_dir, exist_ok=True)
 
     data = np.load(filename)
