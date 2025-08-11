@@ -1,4 +1,5 @@
-# Grasping via Online Adaption by optimizing a grasp quality score
+# Grasping via Online Adaption 
+...by optimizing a grasp quality score
 
 University project for the course "Advanced Deep Learning for Robotics"
 
