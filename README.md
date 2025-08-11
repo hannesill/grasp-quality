@@ -162,6 +162,12 @@ Organized by task:
 
 - Always run with `conda activate adlr` to ensure correct Python and deps.
 - On macOS, PyBullet GUI needs an interactive session
+- If anything except the training of the gq model does not work, try it on the feat-regularization branch. This is likely due to an unwanted merge behavior.
+- Add the correct pythonpath if a module is not found
+  ```
+  cd /Users/hannesill/Developer/grasp-quality
+  export PYTHONPATH=$(pwd)
+  ```
 
 ## Folder structure
 

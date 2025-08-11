@@ -4,6 +4,7 @@
 # Data
 data/*
 !data/splits.json
+checkpoints/*
 
 # URDFs
 urdfs/*
