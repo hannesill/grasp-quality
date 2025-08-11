@@ -1,6 +1,8 @@
-# Grasp Quality Estimation
+# Grasping via Online Adaption by optimizing a grasp quality score
 
-End-to-end pipeline for grasp quality estimation on SDF volumes: preprocessing, training, sampling, optimization, and visualization.
+University project for the course "Advanced Deep Learning for Robotics"
+
+End-to-end pipeline for grasp quality estimation on SDF volumes: preprocessing, training, sampling, optimization, and visualization together with online optimization of this grasp quality estimate w.r.t. the grasp configuration.
 
 ## Environment setup (conda)
 
