@@ -8,8 +8,8 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from dataset import GPUCachedGraspDataset
-from model import GQEstimator
+from src.dataset import GPUCachedGraspDataset
+from src.model import GQEstimator
 
 """
 This script trains a Grasp Quality Estimator (GQEstimator) using a GPU-cached dataset.
@@ -32,7 +32,7 @@ Usage Examples:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('--train_size', type=int, default=5000000, help='Number of training samples')
     parser.add_argument('--val_size', type=int, default=500000, help='Number of validation samples')
     parser.add_argument('--base_channels', type=int, default=8, help='Base channels for the CNN')
