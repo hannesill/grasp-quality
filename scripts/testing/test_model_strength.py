@@ -20,9 +20,36 @@ from tqdm import tqdm
 from scipy.stats import spearmanr, kendalltau
 import matplotlib.pyplot as plt
 import pickle
+import os
+import sys
 
-from model import GQEstimator
-from dataset import SceneDataset
+# Ensure project root is importable and use the current src/ layout
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.model import GQEstimator
+
+class SceneDataset:
+    """
+    Lightweight scene-level dataset compatible with this script.
+    Loads each scene.npz under data/processed/<scene_id>/ and returns
+    tensors for 'sdf', 'grasps', and 'scores'.
+    """
+    def __init__(self, data_path: Path):
+        self.data_path = Path(data_path)
+        self.data_files = [
+            p / 'scene.npz' for p in self.data_path.iterdir()
+            if p.is_dir() and (p / 'scene.npz').exists()
+        ]
+
+    def __len__(self):
+        return len(self.data_files)
+
+    def __getitem__(self, idx: int):
+        scene_file = self.data_files[idx]
+        with np.load(scene_file) as scene_data:
+            sdf = torch.from_numpy(scene_data["sdf"]).float()
+            grasps = torch.from_numpy(scene_data["grasps"]).float()
+            scores = torch.from_numpy(scene_data["scores"]).float()
+        return {"sdf": sdf, "grasps": grasps, "scores": scores}
 
 
 class ComprehensiveModelTester:

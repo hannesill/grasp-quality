@@ -5,6 +5,9 @@
 data/*
 !data/splits.json
 
+# URDFs
+urdfs/*
+
 # Python
 __pycache__
 
