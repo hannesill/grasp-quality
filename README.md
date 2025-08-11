@@ -20,23 +20,28 @@ Notes
 - Python 3.10 is expected in this env. Running with system Python may fail.
 - If some packages are missing, run: `conda env update -n adlr -f environment.yml --prune`.
 
-## Data layout
+## Dataset Setup
+
+The dataset is private. You need to get access to the dataset and copy it under `data/raw`. Also, the URDF of the robot hand in the dataset is private. You need to copy it under `urdfs/`.
 
 Expected directories:
 - `data/raw/<scene_id>/{mesh.obj, recording.npz}`: raw mesh and original grasps+scores
-- `data/processed/<scene_id>/scene.npz`: produced by preprocessing; contains `sdf, grasps, scores, translation, global_scale`
-- `data/splits.json`: train/val/test split ids
+- `urdfs/dlr2.urdf`
 
-## Quick sanity checks
+## Optional quick sanity check
 
 Create a toy SDF and render slices:
 ```bash
 conda activate adlr
-python scripts/data_processing/create_sphere_sdf.py -s 32 -o data/sphere.npz
-python scripts/visualizations/vis_sdf_slices.py -f data/sphere.npz -o data/preview_slices
+python scripts/data_processing/create_sphere_sdf.py
+python scripts/visualizations/vis_sdf_slices.py -f data/sphere.npz
 ```
 
+You should see the 48 SDF slices in `data/preview_slices`. This toy SDF can be a useful resource for sanity checks later on.
+
 ## Scripts overview and usage
+
+### /data_processing/
 
 Preprocessing:
 - `scripts/data_processing/preprocess.py`
@@ -45,16 +50,23 @@ Preprocessing:
     -r data/raw \
     -o data/processed \
     -g 48 \
-    --fix_mesh \
-    --mesh_max_extent 0   # optional; auto-computed if omitted
+    --mesh_max_extent 0   # optional; auto-computed if omitted # TODO Lucas: 0 correct?
   ```
-  Produces `scene.npz` files and writes `mesh_max_extent.txt` in output.
+  Produces `scene.npz` files and writes `mesh_max_extent.txt` in output. There is a `--fix_mesh` flag that signals the preprocesser to try to fix non-watertight meshes. However, this led to unwanted artifacts in the SDFs for us, which is why we leave it out. The downside of this is, that there are no negative SDF values, which prevents us from using collision detection. This is a bug in the mesh2sdf library.
 
 Splits:
 - `scripts/data_processing/create_splits.py`
   ```bash
   python scripts/data_processing/create_splits.py --data_path data/processed --train_ratio 0.8 --val_ratio 0.1 --output_path data/splits.json
   ```
+
+We used a train/val/test split of 80/10/10.
+
+Expected directories after data processing
+- `data/processed/<scene_id>/scene.npz`: produced by preprocessing; contains `sdf, grasps, scores, translation, global_scale`
+- `data/splits.json`: train/val/test split ids
+
+### /training/
 
 Training GQ model:
 - `scripts/training/train.py`
@@ -72,6 +84,8 @@ Train object autoencoder (optional):
   python scripts/training/train_autoencoder.py --data_path data/processed --epochs 100
   ```
 
+  We tried training an autoencoder to use its encoder in the GQ model. However, this resulted in a noticably worse validation loss compared to end-to-end training. Because we have over 7M samples, end-to-end training makes most sense.
+
 Train normalizing flow (grasp prior):
 - `scripts/training/train_nflow.py`
   ```bash
@@ -84,11 +98,15 @@ Train diffusion model (optional):
   python scripts/training/train_diff.py --data_path data/processed --epochs 500 --encoder_path checkpoints/object_encoder.pth
   ```
 
+### /testing/ 
+
 Evaluation and plots:
 - `scripts/testing/eval_gq_model_plot.py` (targets-vs-preds plot)
   ```bash
   python scripts/testing/eval_gq_model_plot.py --model_path final_model.pth --split test --output plots/gq_ordering_final.png
   ```
+
+### /optimization/
 
 Sampling grasps:
 - `scripts/optimization/sample_grasp.py` (nflow or diffusion)
@@ -117,27 +135,19 @@ Optimization using FK loss only:
   python scripts/optimization/optimize_grasp_fk.py --data_path data/processed --scene_idx 0 --num_trials 5 --max_iter 100
   ```
 
-Visualization:
+Find best grasp from optimizer
+- `scripts/optimization/find_best_grasp.py` prints the best (lowest) score index in a `recording.npz`.
+
+### /visualization/
 - `scripts/visualizations/vis_grasp.py` (PyBullet GUI)
   ```bash
   python scripts/visualizations/vis_grasp.py data/processed/<id> --filter highest
   # or use your generated outputs: python scripts/visualizations/vis_grasp.py data/output/<id>
   ```
-- `scripts/visualizations/preview.py` (level sets + per-slice contours)
-  ```bash
-  python scripts/visualizations/preview.py -f data/processed/<id>/scene.npz -o data/preview/<id>
-  ```
 - `scripts/visualizations/vis_sdf_slices.py` (per-slice PNGs with colorbar)
   ```bash
   python scripts/visualizations/vis_sdf_slices.py -f data/processed/<id>/scene.npz -o data/preview_slices/<id>
   ```
-- `scripts/visualizations/vis_sdf_target.py` (visualize grasp and near-zero SDF points)
-  ```bash
-  python scripts/visualizations/vis_sdf_target.py data/processed/<id>/scene.npz --grasp_file_path data/processed/<id>/recording.npz --grasp_index 0
-  ```
-
-Utilities:
-- `scripts/optimization/find_best_grasp.py` prints the best (lowest) score index in a `recording.npz`.
 
 ## Scripts directory structure
 
@@ -151,9 +161,7 @@ Organized by task:
 ## Troubleshooting
 
 - Always run with `conda activate adlr` to ensure correct Python and deps.
-- On macOS, PyBullet GUI needs an interactive session (not over SSH without X).
-- If `scikit-image` or `pybullet` not found: your shell is not using the conda env.
-- If URDF not found, verify `urdfs/dlr2.urdf` exists and that CWD is repo root.
+- On macOS, PyBullet GUI needs an interactive session
 
 ## Folder structure
 
@@ -161,3 +169,4 @@ Organized by task:
 - `src/`: models, datasets, kinematics
 - `data/`: raw, processed, splits, previews
 - `plots/`: generated plots
+- `docs/`: reports, poster etc.
