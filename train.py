@@ -9,43 +9,34 @@ import wandb
 import numpy as np
 
 from dataset import GPUCachedGraspDataset
-from model import GQEstimator
-
-"""
-This script trains a Grasp Quality Estimator (GQEstimator) using a GPU-cached dataset.
-It supports loading pre-trained model weights and logging to Weights & Biases (WandB).
-
-Usage Examples:
-  # Start new training:
-  python train.py --epochs 100 --batch_size 128 --lr 1e-3
-  
-  # Load pre-trained weights and continue training:
-  python train.py --resume_from_saved_model best_model.pth --epochs 100
-  
-  # Train with custom model size:
-  python train.py --base_channels 16 --fc_dims 512 256 128 --batch_size 64
-  
-  # Train with large dataset:
-  python train.py --train_size 1000000 --val_size 100000 --batch_size 256
-"""
+from model import GQEstimator, ImprovedGQEstimator, EfficientGQEstimator
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Grasp Quality Estimator")
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    # Model architecture
+    parser.add_argument('--base_channels', type=int, default=4, help='Base channels for the CNN')
+    parser.add_argument('--spatial_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of spatial encoder')
+    parser.add_argument('--hand_encoder_dims', nargs='+', type=int, default=[32, 32], help='Dimensions of hand encoder')
+    parser.add_argument('--gq_head_dims', nargs='+', type=int, default=[64, 32], help='Dimensions of GQ head')
+    parser.add_argument('--improved', action='store_true', help='Use improved model')
+    parser.add_argument('--efficient', action='store_true', help='Use efficient model')
+    
+    # Training hyperparameters
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--train_size', type=int, default=5000000, help='Number of training samples')
-    parser.add_argument('--val_size', type=int, default=500000, help='Number of validation samples')
-    parser.add_argument('--base_channels', type=int, default=8, help='Base channels for the CNN')
-    parser.add_argument('--fc_dims', nargs='+', type=int, default=[256, 128, 64], help='Dimensions of FC layers')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--train_size', type=int, default=5000, help='Number of training samples')
+    parser.add_argument('--val_size', type=int, default=1000, help='Number of validation samples')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for regularization')
+    parser.add_argument('--resume_from_saved_model', type=str, default=None, help='Path to saved model weights (.pth file) to initialize the model with')
+    
+    # Data
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0 recommended for GPU cached data)')
     parser.add_argument('--data_path', type=str, default='data/processed', help='Path to processed data')
     parser.add_argument('--wandb_entity', type=str, default='tairo', help='WandB entity')
     parser.add_argument('--project_name', type=str, default='adlr', help='WandB project name')
     parser.add_argument('--run_name', type=str, default=None, help='WandB run name')
-    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for regularization')
-    parser.add_argument('--early_stopping_patience', type=int, default=15, help='Early stopping patience')
-    parser.add_argument('--resume_from_saved_model', type=str, default=None, help='Path to saved model weights (.pth file) to initialize the model with')
     return parser.parse_args()
 
 def load_model_weights(model_path, model, device):
@@ -111,11 +102,33 @@ def main(args):
         return
 
     # --- Model Creation ---
-    model = GQEstimator(
-        input_size=48, 
-        base_channels=args.base_channels, 
-        fc_dims=args.fc_dims
-    ).to(device)
+    if args.improved:
+        model = ImprovedGQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            spatial_encoder_dims=args.spatial_encoder_dims,
+            hand_encoder_dims=args.hand_encoder_dims,
+            gq_head_dims=args.gq_head_dims
+        ).to(device)
+        print("Using improved GQEstimator")
+    elif args.efficient:
+        model = EfficientGQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            spatial_encoder_dims=args.spatial_encoder_dims,
+            hand_encoder_dims=args.hand_encoder_dims,
+            gq_head_dims=args.gq_head_dims
+        ).to(device)
+        print("Using efficient GQEstimator")
+    else:
+        model = GQEstimator(
+            input_size=48, 
+            base_channels=args.base_channels, 
+            spatial_encoder_dims=args.spatial_encoder_dims,
+            hand_encoder_dims=args.hand_encoder_dims,
+            gq_head_dims=args.gq_head_dims
+        ).to(device)
+        print("Using standard GQEstimator")
     
     # Load pre-trained weights if specified
     if args.resume_from_saved_model:
@@ -158,9 +171,9 @@ def main(args):
     )
     
     # --- Training Setup ---
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = torch.nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.05, total_iters=args.epochs)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     early_stopping = EarlyStopping(patience=args.early_stopping_patience)
     
     # --- Model Optimization ---
@@ -182,9 +195,9 @@ def main(args):
     
     # --- Training Loop ---
     if args.resume_from_saved_model:
-        print(f"Starting training for {args.epochs} epochs with pre-trained weights...")
+        print(f"\nStarting training for {args.epochs} epochs with pre-trained weights...")
     else:
-        print(f"Starting training for {args.epochs} epochs from scratch...")
+        print(f"\nStarting training for {args.epochs} epochs from scratch...")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
@@ -271,15 +284,15 @@ def main(args):
         epoch_time = time.time() - epoch_start_time
         
         # === PERFORMANCE ANALYSIS ===
-        print(f"\nTRAINING BREAKDOWN ⚡")
+        print(f"\nTRAINING BREAKDOWN")
         print(f"Total epoch time: {epoch_time:.2f}s")
-        print(f"Training time: {training_time:.2f}s ({training_time/epoch_time*100:.1f}%)")
-        print(f"Validation time: {validation_time:.2f}s ({validation_time/epoch_time*100:.1f}%)")
-        
-        print(f"\nTraining phase breakdown:")
-        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time/training_time*100:.2f}%)")
-        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time/training_time*100:.1f}%)")
-        print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time/training_time*100:.1f}%)")
+        print(f"Training time: {training_time:.2f}s ({training_time:.1f}%)")
+        print(f"Validation time: {validation_time:.2f}s ({validation_time:.1f}%)")
+        print("-"*50)
+        print(f"  Data loading: {data_loading_time:.4f}s ({data_loading_time:.2f}%)")
+        print(f"  Forward pass: {forward_pass_time:.2f}s ({forward_pass_time:.1f}%)")
+        print(f"  Backward pass: {backward_pass_time:.2f}s ({backward_pass_time:.1f}%)")
+        print("-"*50)
         
         # Step the scheduler
         scheduler.step()
