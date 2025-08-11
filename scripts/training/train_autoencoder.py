@@ -11,7 +11,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.dataset_sdf import SDFDataset
-from src.model import ObjectAutoEncoder
+from src.model_ae import ObjectAutoEncoder
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Object Autoencoder")

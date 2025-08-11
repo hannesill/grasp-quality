@@ -69,9 +69,9 @@ Expected directories after data processing
 ### /training/
 
 Training GQ model:
-- `scripts/training/train.py`
+- `scripts/training/train_gq.py`
   ```bash
-  python scripts/training/train.py \
+  python scripts/training/train_gq.py \
     --data_path data/processed \
     --splits_file data/splits.json \
     --epochs 100 --batch_size 32 --base_channels 16 --fc_dims 256 128 64
